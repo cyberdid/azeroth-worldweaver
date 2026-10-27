@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">Azeroth Worldweaver architecture</title>
+  <desc id="desc">AzerothCore supplies a shared state stream. Claude and Codex consume it alongside bounded static queries and verified game-window images. Validated actions are a roadmap item.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#08111f"/><stop offset="1" stop-color="#14253a"/></linearGradient>
+    <linearGradient id="gold" x1="0" x2="1"><stop stop-color="#d9b56d"/><stop offset="1" stop-color="#f0d69a"/></linearGradient>
+    <linearGradient id="teal" x1="0" x2="1"><stop stop-color="#4dd4c6"/><stop offset="1" stop-color="#9be8dc"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#020711" flood-opacity=".38"/></filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0v6l9-3z" fill="#7190ae"/></marker>
+    <style>
+      .sans{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+      .title{fill:#f3f6fa;font-size:35px;font-weight:750;letter-spacing:.2px}
+      .sub{fill:#afc0d2;font-size:16px}
+      .card{fill:#122238;stroke:#29435f;stroke-width:1.5}
+      .card2{fill:#102b35;stroke:#286b70;stroke-width:1.5}
+      .card3{fill:#2b2531;stroke:#715c46;stroke-width:1.5}
+      .h{fill:#f3f6fa;font-size:18px;font-weight:700}
+      .t{fill:#b9c9d9;font-size:14px}
+      .tiny{fill:#90a5bc;font-size:12px}
+      .label{fill:#9de1d6;font-size:11px;font-weight:800;letter-spacing:1.2px}
+      .gold{fill:#e2c17c}
+      .line{fill:none;stroke:#7190ae;stroke-width:2;marker-end:url(#arrow)}
+      .dash{fill:none;stroke:#b69a70;stroke-width:2;stroke-dasharray:7 8;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect width="1280" height="720" rx="28" fill="url(#bg)"/>
+  <circle cx="1160" cy="90" r="155" fill="#1b3147" opacity=".22"/>
+  <circle cx="1174" cy="90" r="112" fill="none" stroke="#6a8399" opacity=".18"/>
+  <path d="M1100 90h148M1174 16v148" stroke="#6a8399" opacity=".15"/>
+  <g class="sans">
+    <path d="M56 42h42v42H56z" rx="9" fill="#163f4c" stroke="#4dd4c6"/>
+    <path d="M77 49l14 28H63z" fill="none" stroke="url(#gold)" stroke-width="2.4"/>
+    <circle cx="77" cy="68" r="3" fill="#4dd4c6"/>
+    <text x="116" y="72" class="title">Azeroth Worldweaver</text>
+    <text x="58" y="112" class="sub">One shared, provenance-aware view of a private AzerothCore world</text>
+    <rect x="1023" y="48" width="196" height="33" rx="16.5" fill="#392f22" stroke="#9e8050"/>
+    <circle cx="1045" cy="64.5" r="5" fill="#dfbd72"/>
+    <text x="1060" y="69" fill="#e8d5ad" font-size="11" font-weight="800" letter-spacing="1.2">EXPERIMENTAL PREVIEW</text>
+
+    <!-- Source -->
+    <g filter="url(#shadow)">
+      <rect x="52" y="182" width="270" height="166" rx="18" class="card"/>
+      <rect x="52" y="182" width="5" height="166" rx="2.5" fill="url(#gold)"/>
+    </g>
+    <text x="76" y="212" class="label">GAME SERVER</text>
+    <text x="76" y="243" class="h">AzerothCore · WotLK</text>
+    <text x="76" y="270" class="t">mod-playerbots group</text>
+    <text x="76" y="296" class="t">world hooks · chat bridge</text>
+    <text x="76" y="322" class="tiny">C++ observer source is not yet activated</text>
+
+    <!-- Shared state -->
+    <g filter="url(#shadow)">
+      <rect x="414" y="164" width="390" height="202" rx="20" class="card2"/>
+      <rect x="414" y="164" width="5" height="202" rx="2.5" fill="url(#teal)"/>
+    </g>
+    <text x="442" y="195" class="label">COMMON CONTEXT</text>
+    <text x="442" y="229" class="h">Shared world state</text>
+    <rect x="442" y="249" width="154" height="37" rx="9" fill="#0a1b28" stroke="#27535d"/>
+    <text x="457" y="273" class="t">latest snapshot</text>
+    <rect x="610" y="249" width="165" height="37" rx="9" fill="#0a1b28" stroke="#27535d"/>
+    <text x="624" y="273" class="t">event journal</text>
+    <text x="442" y="316" class="t">sequence · freshness · provenance</text>
+    <text x="442" y="341" class="tiny">live facts stay distinct from static database rows</text>
+
+    <!-- Agents -->
+    <g filter="url(#shadow)">
+      <rect x="895" y="181" width="310" height="78" rx="17" class="card"/>
+      <rect x="895" y="274" width="310" height="78" rx="17" class="card"/>
+    </g>
+    <circle cx="925" cy="220" r="14" fill="#344f75"/>
+    <text x="950" y="216" class="h">Claude</text>
+    <text x="950" y="239" class="t">shared state + chat context</text>
+    <circle cx="925" cy="313" r="14" fill="#17675f"/>
+    <text x="950" y="309" class="h">Codex</text>
+    <text x="950" y="332" class="t">snapshot + events + images</text>
+
+    <!-- Main arrows -->
+    <path d="M322 265h78" class="line"/>
+    <path d="M804 228h78" class="line"/>
+    <path d="M804 300h78" class="line"/>
+    <text x="338" y="250" class="tiny">observed state</text>
+
+    <!-- Data enrichers -->
+    <g filter="url(#shadow)">
+      <rect x="78" y="436" width="335" height="151" rx="18" class="card2"/>
+      <rect x="473" y="436" width="335" height="151" rx="18" class="card"/>
+      <rect x="868" y="436" width="335" height="151" rx="18" class="card3"/>
+    </g>
+    <text x="104" y="468" class="label">STATIC GAME KNOWLEDGE</text>
+    <text x="104" y="501" class="h">Read-only query relay</text>
+    <text x="104" y="528" class="t">creatures · quests · fishing · loot</text>
+    <text x="104" y="554" class="tiny">fixed operations · no agent-supplied SQL</text>
+    <text x="499" y="468" class="label">VISUAL CONTEXT</text>
+    <text x="499" y="501" class="h">Verified WoW window</text>
+    <text x="499" y="528" class="t">window-only X11 capture</text>
+    <text x="499" y="554" class="tiny">image metadata is matched to world state</text>
+    <text x="894" y="468" fill="#d4b388" font-size="11" font-weight="800" letter-spacing="1.2">NEXT MILESTONE</text>
+    <text x="894" y="501" class="h">Typed game actions</text>
+    <text x="894" y="528" class="t">validated request → observed result</text>
+    <text x="894" y="554" class="tiny">server dispatcher still needs implementation</text>
+
+    <!-- Enrichment connectors -->
+    <path d="M245 436v-49h270v-13" class="line"/>
+    <path d="M640 436v-56" class="line"/>
+    <path d="M1035 436v-60h-44v-24" class="dash"/>
+
+    <path d="M56 632h1168" stroke="#29415a"/>
+    <text x="58" y="663" class="tiny">Designed for trusted, self-hosted AzerothCore · Private telemetry stays local · No game assets bundled</text>
+    <text x="1058" y="663" fill="#d9b56d" font-size="12" font-weight="700">WORLDWEAVER</text>
+  </g>
+</svg>

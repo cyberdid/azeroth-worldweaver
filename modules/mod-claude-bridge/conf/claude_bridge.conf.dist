@@ -1,0 +1,65 @@
+[worldserver]
+
+#
+#    ClaudeBridge.BotNames
+#        Description: Comma separated character names of the playerbots that external agents speak and act through.
+#        Default:     "Claude"
+#
+ClaudeBridge.BotNames = "Claude"
+
+#
+#    ClaudeBridge.LogDir
+#        Description: Directory for the per-bot chat logs "<lowercase bot name>-chat.log". Each receives whispers to
+#                     that bot and party chat of its group, one "unix_time|CHANNEL|sender|text" line per message.
+#        Default:     "."
+#
+ClaudeBridge.LogDir = "."
+
+#
+#    ClaudeBridge.TelemetryDir
+#        Description: Shared directory for atomic group snapshots and rotated event journals. Empty means LogDir.
+#        Default:     "/var/lib/azeroth-worldweaver"
+#
+ClaudeBridge.TelemetryDir = "/var/lib/azeroth-worldweaver"
+
+#
+#    ClaudeBridge.ChatContextBotNames
+#        Description: Bridge bots that receive a compact cached world observation attached to each real incoming chat line.
+#        Default:     "Claude"
+#
+ClaudeBridge.ChatContextBotNames = "Claude"
+
+#
+#    ClaudeBridge.TelemetryIntervalMs
+#        Description: How often the bridge publishes a latest world snapshot (bounded to 250-5000 ms).
+#        Default:     1000
+#
+ClaudeBridge.TelemetryIntervalMs = 1000
+
+#
+#    ClaudeBridge.TelemetryRadius
+#        Description: Maximum search radius in yards for nearby loaded objects, also capped by client visibility.
+#        Default:     100
+#
+ClaudeBridge.TelemetryRadius = 100
+
+#
+#    ClaudeBridge.TelemetryMaxObjects
+#        Description: Maximum nearby creatures and game objects serialized per snapshot (bounded to 1-100).
+#        Default:     40
+#
+ClaudeBridge.TelemetryMaxObjects = 40
+
+#
+#    ClaudeBridge.TelemetryEventQueueLimit
+#        Description: Maximum pending event/chat records in the async writer queue.
+#        Default:     256
+#
+ClaudeBridge.TelemetryEventQueueLimit = 256
+
+#
+#    ClaudeBridge.TelemetryEventLogBytes
+#        Description: Maximum bytes in each event log before rotating to one bounded .1 archive.
+#        Default:     4194304
+#
+ClaudeBridge.TelemetryEventLogBytes = 4194304
