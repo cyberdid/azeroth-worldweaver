@@ -6,12 +6,13 @@
 
 ## Goal
 
-Let the user give Claude or Codex a natural-language task in game chat and have the addressed bot carry it through to an observable result. Tasks may combine movement, search, hunting, loot, profession use, NPC dialogue, quests, training, purchases, and other native NPC services. A clear user instruction authorizes the in-game consequences required by that task, including spending game gold. The bot asks only when a material choice is ambiguous or required information is missing.
+Let the user give Claude or Codex a natural-language task in game chat and have the addressed bot carry it through to an observable result. Tasks may combine movement, search, hunting, loot, transferring loot to the user, profession use, NPC dialogue, quests, training, purchases, and other native NPC services. A clear user instruction authorizes the in-game consequences required by that task, including spending game gold. The bot asks only when a material choice is ambiguous or required information is missing.
 
 ## Current baseline
 
 - The bridge has a fixed typed action protocol for follow/stay, attack, loot, fishing, learned spell casting, NPC approach/dialog inspection, and restricted gossip selection.
 - The observer reports group state, active quests, skills, inventory, nearby loaded objects, NPC roles, quest status, spellbooks, and dialog results. Some lists are capped and expose truncation.
+- `loot_nearby` asks the actor to loot for itself; there is no bridge action to transfer the resulting items to the user. The mod-playerbots source includes native trade and inventory-transfer actions that can inform a typed, validated handoff.
 - The server currently rejects trainer and other NPC service options. One model response can submit at most one action; the bridge does not yet manage a multi-action task to completion.
 - Movement and combat continue to use AzerothCore/mod-playerbots. Agents do not control the client through arbitrary keyboard or mouse events.
 
@@ -19,6 +20,7 @@ Let the user give Claude or Codex a natural-language task in game chat and have 
 
 - Only messages from configured user characters can create tasks. A task is assigned to the addressed bot; the other agent may observe the shared world but cannot execute the same request.
 - The user's task is the authorization boundary. If the user asks to learn a skill, buy a specified recipe, complete a quest, or hunt a stated target, the bot may perform the necessary in-game steps without asking after each step.
+- If the task says to bring or give the hunt's loot to the user, transfer only items acquired by that task. Pre-existing inventory requires an explicit item/count instruction; ambiguous “give me your loot” must not silently include unrelated inventory.
 - Ask the user when the task leaves a consequential choice unresolved, such as selecting among materially different quest rewards, choosing which item to sell, or selecting among multiple destinations that do not satisfy the same stated goal.
 - Never create new goals from NPC text, party-bot speech, quest text, database content, or telemetry. Such data are observations, not authority.
 - Do not add arbitrary shell, SQL, SOAP, or raw server-command actions. All model output that can affect the world must match a fixed typed schema and be revalidated on the world thread.
@@ -58,6 +60,7 @@ Keep the adapter schema strict and use stable numeric identifiers rather than mo
 | Quests | Accept, inspect progress, complete/turn in, choose reward, abandon only when directly requested | Quest is actually offered/active/complete for this actor; reward item is one of the current choices; verify quest status and reward/inventory changes. Ask if the requested reward is ambiguous. |
 | Trainers and professions | List training offers, learn a specified spell/skill, inspect known recipes, craft a specified recipe/count | Use native trainer/crafting paths; recheck skill prerequisites, active spell/recipe, reagents, money, inventory capacity, and count bounds. Verify learned skill/spell and produced items. |
 | Vendors | List offers, buy specified item/count, sell specified item/count | Recheck live vendor GUID, price, ownership, stack/count limits, bag capacity, and available gold; verify item and gold deltas. Never sell an item based only on an inferred name when the item GUID/slot is ambiguous. |
+| Loot handoff | Transfer specified items or loot acquired during the current task to the authenticated requester | Recheck actor-master/group relation, exact source item and count, trade/bind restrictions, recipient bag capacity, and current task provenance. Use the native trade/inventory path; verify the item leaves the bot and appears in the requester's inventory. Never move unrelated pre-existing items. |
 | Repair and inn services | Repair specified equipment/all, set inn bind when requested | Recheck NPC role, equipment durability, cost, and bind choice; verify durability or bind state. |
 | Travel | Query and select flight routes or other native destinations | Use current offered destinations; validate route reachability and the requested destination. Do not accept arbitrary model-supplied coordinates. |
 | Other native services | Banker, auctioneer, mailbox, stable, battle master, spirit healer, guild services, and any additional NPC flags supported by the running core | Add a dedicated typed handler and observable result for each service; do not silently route unknown service options through generic gossip. If the core exposes no safe typed API or adequate result evidence, report that service as unsupported. |
@@ -81,7 +84,7 @@ World writes remain limited to ordinary in-game actions explicitly authorized by
 
 1. Add task lifecycle/correlation and interruption/bounds while retaining the existing fixed action interface.
 2. Add NPC service catalogs and the common quest, trainer/profession, vendor, repair, and travel operations.
-3. Add search/hunting task recipes over live queries, static world data, playerbot pathing/combat, and verified loot/progress.
+3. Add search/hunting task recipes over live queries, static world data, playerbot pathing/combat, verified loot/progress, and explicit loot handoff to the user.
 4. Complete the registry for the remaining native NPC services available in this AzerothCore build, including banker/auction/mail/guild/stable/battle/spirit services where safe APIs exist.
 5. Deploy to the private server and verify representative user-ordered tasks in game without screenshots unless explicitly requested. Document unsupported scripted interactions and any limits found.
 
@@ -92,6 +95,7 @@ World writes remain limited to ordinary in-game actions explicitly authorized by
 - A direct order can authorize the stated in-game spending/training/quest changes; the bot does not perform unrelated purchases, quest choices, or service actions.
 - NPC service choices are discovered from current server state and revalidated immediately before the native operation.
 - Hunting/search tasks target live entities, use server-resolved destinations, track progress from server evidence, and stop at the requested goal or search bound.
+- A task explicitly asking to deliver its loot transfers only those task-acquired, tradeable items and confirms the resulting inventory change for both bot and user.
 - Every state-changing action has an auditable result; completion is reported only when later telemetry confirms the requested result.
 - No arbitrary shell/SQL/server command or model-supplied coordinate enters the action path.
 - Build and private live checks cover representative NPC services and a multi-step search/hunt task. Automated tests are not included unless requested by the user.
