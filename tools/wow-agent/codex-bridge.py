@@ -97,7 +97,7 @@ Nearby-object lists have radius and server-count bounds. `nearby_server_truncate
 objects than `nearby_server_limit`; an unlisted object may still be nearby. `nearby_context_truncated` means the prompt
 omitted some server-listed objects. When either flag is true and the task needs more detail, use the typed `nearby`
 operation to filter/page the live snapshot with `--kind`, `--entry`, `--name`, `--map-id`, `--radius`,
-`--line-of-sight`, `--attackable-only`, or `--fishing-only`; pass `--group-id` and page using `--limit` (1-50)
+`--line-of-sight`, `--attackable-only`, `--fishing-only`, or `--quest-status`; optionally combine the last filter with `--quest-member-guid` for one member. Use quest filters only when `observer_features.quest_dialog_by_member` is true; otherwise the helper reports them unavailable. Pass `--group-id` and page using `--limit` (1-50)
 and `--offset`. Follow `next_offset` exactly when present because pages can be shortened to fit the response-size limit.
 Verify its session, sequence, age, `clock_skew`, and `stale` flag.
 For multi-page results, pass the first page's `snapshot.session_id` and `snapshot.snapshot_seq` as `--session-id` and `--snapshot-seq` on every continuation. The helper keeps a private snapshot cache for up to 30 seconds. If it returns `snapshot_changed`, discard prior pages and restart at offset 0; if any page returns an error, do not merge it with earlier pages. Never merge pages from different sessions or sequences.
