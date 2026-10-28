@@ -17,6 +17,8 @@
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Player.h"
+#include "PlayerbotAI.h"
+#include "Playerbots.h"
 #include "PlayerScript.h"
 #include "QuestDef.h"
 #include "ScriptMgr.h"
@@ -80,6 +82,7 @@ namespace
         uint64 targetGuid = 0;
         bool inCombat = false;
         uint8 healthBand = 0;
+        std::unordered_map<uint32, std::string> questProgress;
     };
 
     struct GroupSequence
@@ -711,11 +714,30 @@ namespace
             Unit* target = member->GetSelectedUnit();
             if (target == member)
                 target = nullptr;
+            PlayerbotAI* botAI = IsBridgeBot(member->GetName()) ? sPlayerbotsMgr.GetPlayerbotAI(member) : nullptr;
             Spell* genericCast = member->GetCurrentSpell(CURRENT_GENERIC_SPELL);
             Spell* channelCast = member->GetCurrentSpell(CURRENT_CHANNELED_SPELL);
 
             out << "{\"name\":\"" << JsonEscape(member->GetName())
                 << "\",\"bridge_bot\":" << (IsBridgeBot(member->GetName()) ? "true" : "false")
+                << ",\"playerbot\":";
+            if (botAI)
+            {
+                Player* master = botAI->GetMaster();
+                out << "{\"master\":\"" << JsonEscape(master ? master->GetName() : "")
+                    << "\",\"strategies\":{\"follow\":"
+                    << (botAI->HasStrategy("follow", BOT_STATE_NON_COMBAT) ? "true" : "false")
+                    << ",\"stay\":" << (botAI->HasStrategy("stay", BOT_STATE_NON_COMBAT) ? "true" : "false")
+                    << ",\"master_fishing\":" << (botAI->HasStrategy("master fishing", BOT_STATE_NON_COMBAT) ? "true" : "false")
+                    << ",\"quest\":" << (botAI->HasStrategy("quest", BOT_STATE_NON_COMBAT) ? "true" : "false")
+                    << ",\"loot\":" << (botAI->HasStrategy("loot", BOT_STATE_NON_COMBAT) ? "true" : "false")
+                    << ",\"grind\":" << (botAI->HasStrategy("grind", BOT_STATE_NON_COMBAT) ? "true" : "false")
+                    << "},\"moving\":" << (member->isMoving() ? "true" : "false")
+                    << ",\"state\":" << unsigned(botAI->GetState()) << '}';
+            }
+            else
+                out << "null";
+            out
                 << ",\"level\":" << unsigned(member->GetLevel())
                 << ",\"class_id\":" << unsigned(member->getClass())
                 << ",\"map_id\":" << member->GetMapId()
@@ -935,6 +957,15 @@ namespace
                     << "% combat=" << (member->IsInCombat() ? "yes" : "no")
                     << " fishing=" << member->GetSkillValue(SKILL_FISHING) << '/' << member->GetMaxSkillValue(SKILL_FISHING);
 
+                if (PlayerbotAI* botAI = IsBridgeBot(member->GetName()) ? sPlayerbotsMgr.GetPlayerbotAI(member) : nullptr)
+                    compact << " playerbot_master=" << (botAI->GetMaster() ? botAI->GetMaster()->GetName() : "unknown")
+                        << " strategies[follow=" << (botAI->HasStrategy("follow", BOT_STATE_NON_COMBAT) ? "on" : "off")
+                        << ",stay=" << (botAI->HasStrategy("stay", BOT_STATE_NON_COMBAT) ? "on" : "off")
+                        << ",fishing=" << (botAI->HasStrategy("master fishing", BOT_STATE_NON_COMBAT) ? "on" : "off")
+                        << ",quest=" << (botAI->HasStrategy("quest", BOT_STATE_NON_COMBAT) ? "on" : "off")
+                        << ",loot=" << (botAI->HasStrategy("loot", BOT_STATE_NON_COMBAT) ? "on" : "off")
+                        << "] moving=" << (member->isMoving() ? "yes" : "no");
+
                 Unit* target = member->GetSelectedUnit();
                 if (target && target != member)
                     compact << " target=" << target->GetNameForLocaleIdx(locale)
@@ -1064,6 +1095,46 @@ namespace
         return out.str();
     }
 
+    std::unordered_map<uint32, std::string> CaptureQuestProgress(Player* player)
+    {
+        std::unordered_map<uint32, std::string> progress;
+        if (!player)
+            return progress;
+
+        QuestStatusMap const& statuses = player->getQuestStatusMap();
+        for (uint8 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+        {
+            uint32 const questId = player->GetQuestSlotQuestId(slot);
+            if (!questId)
+                continue;
+
+            auto status = statuses.find(questId);
+            QuestStatusData const* data = status == statuses.end() ? nullptr : &status->second;
+            Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+            std::ostringstream payload;
+            payload << "{\"quest_id\":" << questId
+                << ",\"title\":\"" << JsonEscape(quest ? quest->GetTitle() : "Unknown")
+                << "\",\"status\":" << unsigned(data ? data->Status : QUEST_STATUS_NONE)
+                << ",\"item_progress\":[";
+            for (uint8 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
+            {
+                if (i)
+                    payload << ',';
+                payload << (data ? data->ItemCount[i] : 0);
+            }
+            payload << "],\"creature_progress\":[";
+            for (uint8 i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+            {
+                if (i)
+                    payload << ',';
+                payload << (data ? data->CreatureOrGOCount[i] : 0);
+            }
+            payload << "],\"explored\":" << (data && data->Explored ? "true" : "false") << '}';
+            progress.emplace(questId, payload.str());
+        }
+        return progress;
+    }
+
     void TrackMemberTransitions(GroupContext const& context)
     {
         GroupSequence& sequence = groupSequences[context.key];
@@ -1073,6 +1144,8 @@ namespace
                 continue;
 
             Unit* target = player->GetSelectedUnit();
+            if (target == player)
+                target = nullptr;
             PlayerDelta current;
             current.mapId = player->GetMapId();
             current.instanceId = player->GetInstanceId();
@@ -1080,6 +1153,7 @@ namespace
             current.targetGuid = target ? target->GetGUID().GetRawValue() : 0;
             current.inCombat = player->IsInCombat();
             current.healthBand = static_cast<uint8>(std::min<unsigned>(3, unsigned(player->GetHealthPct()) / 25));
+            current.questProgress = CaptureQuestProgress(player);
 
             uint64 const playerGuid = player->GetGUID().GetRawValue();
             auto previous = sequence.players.find(playerGuid);
@@ -1108,8 +1182,22 @@ namespace
                     current.zoneId, payload.str(), "instance=" + std::to_string(current.instanceId));
             }
             if (old.inCombat != current.inCombat)
+            {
+                std::ostringstream payload;
+                payload << "{\"target_guid\":" << current.targetGuid;
+                if (target)
+                    payload << ",\"target_name\":\"" << JsonEscape(target->GetNameForLocaleIdx(sWorld->GetDefaultDbcLocale())) << '"';
+                payload << '}';
                 PublishEvent(context, current.inCombat ? "combat_start" : "combat_end", player->GetName(), current.mapId,
-                    current.instanceId, current.zoneId, "{}", current.inCombat ? "entered combat" : "left combat");
+                    current.instanceId, current.zoneId, payload.str(), current.inCombat ? "entered combat" : "left combat");
+            }
+            for (auto const& quest : current.questProgress)
+            {
+                auto previousQuest = old.questProgress.find(quest.first);
+                if (previousQuest == old.questProgress.end() || previousQuest->second != quest.second)
+                    PublishEvent(context, "quest_progress", player->GetName(), current.mapId, current.instanceId,
+                        current.zoneId, quest.second, "quest=" + std::to_string(quest.first) + " objectives changed");
+            }
             if (old.healthBand != current.healthBand)
             {
                 std::ostringstream payload;
@@ -1121,7 +1209,8 @@ namespace
         }
     }
 
-    void PublishNearbyObjectEvent(WorldObject* object, std::string const& type, std::string const& detail)
+    void PublishNearbyObjectEvent(WorldObject* object, std::string const& type, std::string const& detail,
+        std::string const& extraPayload = "")
     {
         if (!object)
             return;
@@ -1145,7 +1234,10 @@ namespace
         payload << "{\"object_type\":\"" << objectType << "\",\"entry\":" << object->GetEntry()
             << ",\"name\":\"" << JsonEscape(objectName) << "\",\"phase_mask\":" << phaseMask
             << ",\"map_id\":" << mapId << ",\"instance_id\":" << instanceId
-            << ",\"position\":[" << x << ',' << y << ',' << z << "]}";
+            << ",\"position\":[" << x << ',' << y << ',' << z << ']';
+        if (!extraPayload.empty())
+            payload << ',' << extraPayload;
+        payload << '}';
         PendingObservedEvent event;
         event.subjectGuid = objectGuid;
         event.mapId = mapId;
@@ -1345,14 +1437,17 @@ namespace
 
         void OnPlayerPVPKill(Player* killer, Player* killed) override
         {
-            PublishPlayerEvent(killer, "pvp_kill", "{\"target\":\"" + JsonEscape(killed ? killed->GetName() : "") + "\"}",
+            PublishPlayerEvent(killer, "pvp_kill", "{\"target_guid\":" +
+                std::to_string(killed ? killed->GetGUID().GetRawValue() : 0) + ",\"target\":\"" +
+                JsonEscape(killed ? killed->GetName() : "") + "\"}",
                 killed ? "killed=" + killed->GetName() : "");
         }
 
         void OnPlayerCreatureKillCredit(Player* player, Creature* killed) override
         {
             PublishPlayerEvent(player, "creature_kill_credit",
-                "{\"entry\":" + std::to_string(killed ? killed->GetEntry() : 0) + ",\"name\":\"" +
+                "{\"target_guid\":" + std::to_string(killed ? killed->GetGUID().GetRawValue() : 0) +
+                    ",\"entry\":" + std::to_string(killed ? killed->GetEntry() : 0) + ",\"name\":\"" +
                     JsonEscape(killed ? killed->GetName() : "") + "\"}",
                 killed ? "killed=" + killed->GetName() : "");
         }
@@ -1362,8 +1457,14 @@ namespace
             SpellInfo const* info = spell ? spell->GetSpellInfo() : nullptr;
             if (!info)
                 return;
+            LocaleConstant const locale = sWorld->GetDefaultDbcLocale();
+            char const* spellName = info->SpellName[locale];
+            if (!spellName || !spellName[0])
+                spellName = info->SpellName[0];
             PublishPlayerEvent(player, "spell_cast", "{\"spell_id\":" + std::to_string(info->Id) +
-                ",\"skip_check\":" + (skipCheck ? "true" : "false") + "}", "spell_id=" + std::to_string(info->Id));
+                ",\"spell_name\":\"" + JsonEscape(spellName ? spellName : "") + "\",\"skip_check\":" +
+                (skipCheck ? "true" : "false") + "}", "spell=" + std::string(spellName ? spellName : "unknown") +
+                "#" + std::to_string(info->Id));
         }
 
         void OnPlayerMapChanged(Player* player) override
@@ -1395,11 +1496,12 @@ namespace
                     std::to_string(item->GetEntry()) + "}", "unequipped=" + std::to_string(item->GetEntry()));
         }
 
-        void OnPlayerLootItem(Player* player, Item* item, uint32 count, ObjectGuid /*lootguid*/) override
+        void OnPlayerLootItem(Player* player, Item* item, uint32 count, ObjectGuid lootGuid) override
         {
             if (player && item)
                 PublishPlayerEvent(player, "loot_item", "{\"entry\":" + std::to_string(item->GetEntry()) +
-                    ",\"count\":" + std::to_string(count) + "}",
+                    ",\"count\":" + std::to_string(count) + ",\"loot_guid\":" +
+                    std::to_string(lootGuid.GetRawValue()) + "}",
                     "loot=" + std::to_string(item->GetEntry()) + " x" + std::to_string(count));
         }
 
@@ -1427,7 +1529,10 @@ namespace
             if (player && skill == SKILL_FISHING)
                 PublishPlayerEvent(player, "fishing_skill_roll", "{\"skill\":" + std::to_string(skill) +
                     ",\"zone_skill\":" + std::to_string(zoneSkill) + ",\"chance\":" + std::to_string(chance) +
-                    ",\"roll\":" + std::to_string(roll) + "}", "fishing skill roll");
+                    ",\"roll\":" + std::to_string(roll) + ",\"catch_success\":" +
+                    (chance >= roll ? "true" : "false") + ",\"outcome\":\"" +
+                    (chance >= roll ? "catch" : "junk") + "\"}",
+                    chance >= roll ? "fishing catch roll succeeded" : "fishing catch roll failed; junk loot");
             return true;
         }
 
@@ -1453,7 +1558,9 @@ namespace
         {
             if (Creature* creature = unit ? unit->ToCreature() : nullptr)
                 PublishNearbyObjectEvent(creature, "creature_combat_start",
-                    victim ? "victim=" + victim->GetName() : "victim=unknown");
+                    victim ? "victim=" + victim->GetName() : "victim=unknown",
+                    victim ? "\"victim_guid\":" + std::to_string(victim->GetGUID().GetRawValue()) +
+                        ",\"victim_name\":\"" + JsonEscape(victim->GetNameForLocaleIdx(sWorld->GetDefaultDbcLocale())) + "\"" : "");
         }
 
         void OnUnitExitCombat(Unit* unit) override
@@ -1462,10 +1569,12 @@ namespace
                 PublishNearbyObjectEvent(creature, "creature_combat_end", "left combat");
         }
 
-        void OnUnitDeath(Unit* unit, Unit* /*killer*/) override
+        void OnUnitDeath(Unit* unit, Unit* killer) override
         {
             if (Creature* creature = unit ? unit->ToCreature() : nullptr)
-                PublishNearbyObjectEvent(creature, "creature_death", "died");
+                PublishNearbyObjectEvent(creature, "creature_death", "died",
+                    killer ? "\"killer_guid\":" + std::to_string(killer->GetGUID().GetRawValue()) +
+                        ",\"killer_name\":\"" + JsonEscape(killer->GetName()) + "\"" : "");
         }
     };
 
@@ -1503,14 +1612,19 @@ namespace
         void OnGameObjectStateChanged(GameObject* object, uint32 state) override
         {
             if (object)
-                PublishNearbyObjectEvent(object, "gameobject_state", "state=" + std::to_string(state));
+                PublishNearbyObjectEvent(object, "gameobject_state", "state=" + std::to_string(state),
+                    "\"state\":" + std::to_string(state));
         }
 
         void OnGameObjectLootStateChanged(GameObject* object, uint32 state, Unit* unit) override
         {
             if (object)
                 PublishNearbyObjectEvent(object, "gameobject_loot_state", "state=" + std::to_string(state) +
-                    (unit ? " unit=" + unit->GetName() : ""));
+                    (unit ? " unit=" + unit->GetName() : ""),
+                    "\"loot_state\":" + std::to_string(state) + (unit
+                        ? ",\"unit_guid\":" + std::to_string(unit->GetGUID().GetRawValue()) +
+                            ",\"unit_name\":\"" + JsonEscape(unit->GetName()) + "\""
+                        : ""));
         }
     };
 }

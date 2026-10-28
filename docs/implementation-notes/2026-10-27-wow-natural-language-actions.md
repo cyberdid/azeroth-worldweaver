@@ -21,7 +21,8 @@
 ## Current status (2026-10-28)
 
 - The fixed action protocol, Python validation/dispatch client, both chat adapters, server-side allowlist, SOAP command, and correlated accepted/rejected world events are implemented.
-- The live Playerbot worktree compiled the new static module successfully. A post-restart in-game action and telemetry acknowledgement are still required; this is not yet end-to-end verified.
+- The live Playerbot worktree compiled the new static module successfully. A live `follow` probe exposed that the low-level `follow` tick is useless when a bot is already in formation range; the code now maps both `follow` and `stay` to the real persistent chat shortcuts. The corrected binary is built but is not running yet because the user is in game.
+- A typed in-game action and resulting telemetry acknowledgement remain unverified; the earlier probe was correctly rejected by the old running binary as `action_unavailable`.
 - The first allowlist covers follow/stay, attack, loot, and fishing primitives. Spell/item, named travel, quest selection, and arbitrary command execution are outside this version.
 
 ---

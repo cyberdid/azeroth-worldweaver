@@ -39,8 +39,8 @@ namespace
     };
 
     constexpr ActionTypeInfo ACTION_TYPES[] = {
-        {"follow", "follow"},
-        {"stay", "stay"},
+        {"follow", "follow chat shortcut"},
+        {"stay", "stay chat shortcut"},
         {"attack_master_target", "attack my target"},
         {"attack_nearby", "attack anything"},
         {"loot_nearby", "loot"},

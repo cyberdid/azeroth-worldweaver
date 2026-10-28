@@ -33,8 +33,8 @@ These names are registered in `modules/mod-playerbots/src/Ai/Base/ActionContext.
 
 | Typed intent | Playerbot action | Source behavior and required check |
 |---|---|---|
-| `follow` | `follow` | Existing `FollowAction`; actor must be an online bridge bot in the user's group. |
-| `stay` | `stay` | Existing `StayAction`; actor must be an online bridge bot in the user's group. |
+| `follow` | `follow chat shortcut` | Existing playerbot chat shortcut enables the persistent follow strategy and clears stay/return positions; the low-level `follow` tick action can be useless while already in range. |
+| `stay` | `stay chat shortcut` | Existing playerbot chat shortcut records the bot's current stay position and switches off follow; the low-level `stay` tick action only stops current movement. |
 | `attack_master_target` | `attack my target` | Uses the master's selected unit. Require a live, hostile, same-map/instance/phase creature and let `AttackAction` enforce its native attack checks. |
 | `attack_nearby` | `attack anything` | Existing target-selection action; allowed only when its own `isUseful`/`isPossible` checks pass. |
 | `loot_nearby` | `loot` | Existing loot selection and movement; keep its native item/loot rules. |

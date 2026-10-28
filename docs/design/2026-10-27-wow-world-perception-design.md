@@ -1,7 +1,7 @@
 # WoW World Perception and Agent Interaction
 
 Date: 2026-10-27
-Status: design approved; a private local deployment is running. The server was rebuilt and restarted with a 500-object nearby cap, a 256K context budget, and a typed paged query for pinned live nearby records. On 2026-10-28, a fresh group snapshot held 109 untruncated nearby records and all 3 group members; the server reported 4/6/7 ms p95/99/max with one connected player. Fresh Claude/Codex model responses, dense-area cost, a clean public installation, and the full natural-language action loop remain unverified or incomplete.
+Status: design approved; a private local deployment is running. The server was rebuilt and restarted with a 500-object nearby cap, a 256K context budget, and a typed paged query for pinned live nearby records. On 2026-10-28, a fresh post-restart group snapshot held all 3 members and 108 untruncated nearby records; the server reported 7/15/25 ms p95/99/max with one connected player. A follow probe exposed a mismatch between the low-level tick action and the persistent chat shortcut; the corrected action mapping and richer event fields compile, but await activation after the current play session. Fresh model responses, dense-area cost, a clean public installation, and full action-loop validation remain incomplete.
 
 ## Goal
 
