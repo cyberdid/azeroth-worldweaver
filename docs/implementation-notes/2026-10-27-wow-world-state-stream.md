@@ -41,7 +41,7 @@
 - [ ] Start and stop the writer from `WorldScript::OnStartup` and `WorldScript::OnShutdown`.
 - [ ] On the worker thread only, write `world-state-<group>.json` and append `world-events-<group>.jsonl` under `TelemetryDir`; rotate event files at the configured cap. Do not turn events into chat-log lines.
 - [ ] Preserve the previous snapshot if a temporary write or rename fails; increment a visible dropped-event counter when a full event queue rejects a record.
-- [x] After user approval, run `make -j20 worldserver`, install the resulting binary, and restart the private worldserver. A fresh post-restart group snapshot is still needed to verify the new fields live.
+- [x] After user approval, run `make -j20 worldserver`, install the resulting binary, and restart the private worldserver. A fresh post-restart snapshot verified inventory counts/items for all three members and creature attackability/trigger fields; adapter replies after the restart remain to be checked with a real user message.
 
 ### Task 2: Sample live group state and emit events
 
