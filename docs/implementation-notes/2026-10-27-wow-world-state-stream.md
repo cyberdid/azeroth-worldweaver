@@ -41,7 +41,7 @@
 - [ ] Start and stop the writer from `WorldScript::OnStartup` and `WorldScript::OnShutdown`.
 - [ ] On the worker thread only, write `world-state-<group>.json` and append `world-events-<group>.jsonl` under `TelemetryDir`; rotate event files at the configured cap. Do not turn events into chat-log lines.
 - [ ] Preserve the previous snapshot if a temporary write or rename fails; increment a visible dropped-event counter when a full event queue rejects a record.
-- [ ] Build the C++ target only after the user approves the rebuild; record the command and result in the handoff.
+- [x] After user approval, reconfigure CMake and run `make -j20 worldserver`; the target compiled successfully in the local Playerbot checkout. The artifact has not been installed or started.
 
 ### Task 2: Sample live group state and emit events
 

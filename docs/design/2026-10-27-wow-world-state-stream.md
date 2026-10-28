@@ -9,7 +9,7 @@ Give Claude and Codex the same fresh, bounded, live view of their current group 
 
 ## Current gap
 
-The currently deployed build is stale: its chat hook serializes snapshots synchronously only when chat arrives and writes them to each bot log as `BOTSAY`. The prepared `WorldScript` observer/writer source is newer than that build and has not been activated. The current deployment has no fresh snapshot or event stream while the server is stopped. Claude's active monitor drops every `BOTSAY` line; the Codex reader supports the shared snapshot/event format, but neither agent can consume live observer data until deployment and in-game validation.
+The installed server binary is stale: its chat hook serializes snapshots synchronously only when chat arrives and writes them to each bot log as `BOTSAY`. The new `WorldScript` observer/writer compiled in the local build tree but has not been installed or activated. The current deployment has no fresh snapshot or event stream while the server is stopped. Claude's active monitor drops every standalone `BOTSAY` line; the Codex reader supports the shared snapshot/event format, but neither agent can consume live observer data until deployment and in-game validation.
 
 ## Design
 

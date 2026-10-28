@@ -1,7 +1,7 @@
 # WoW World Perception and Agent Interaction
 
 Date: 2026-10-27
-Status: design approved; implementation in progress. The bounded static-world query relay is installed in the live Codex bridge and has returned read-only database results. The shared observer source and screenshot adapter are prepared, but the live server has not loaded the observer; full live telemetry/screenshots still need the approved worldserver rebuild/restart and in-game confirmation.
+Status: design approved; implementation in progress. The bounded static-world query relay is installed in the Codex bridge and has returned read-only database results. The shared observer has compiled against the local Playerbot worktree, but its binary is not installed or running; screenshots and live telemetry still need deployment and in-game confirmation.
 
 ## Goal
 

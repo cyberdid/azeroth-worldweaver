@@ -312,7 +312,7 @@ namespace
         return players;
     }
 
-    std::string MakeGroupKey(Group* group, Player* bot)
+    std::string MakeGroupKey(Group const* group, Player const* bot)
     {
         uint64 const guid = group ? group->GetLeaderGUID().GetRawValue() : bot->GetGUID().GetRawValue();
         return std::to_string(guid);
@@ -1272,7 +1272,7 @@ namespace
             PLAYERHOOK_ON_LOOT_ITEM,
             PLAYERHOOK_ON_STORE_NEW_ITEM,
             PLAYERHOOK_ON_QUEST_ABANDON,
-            PLAYERHOOK_ON_QUEST_ACCEPT,
+            PLAYERHOOK_ON_PLAYER_QUEST_ACCEPT,
             PLAYERHOOK_ON_UPDATE_FISHING_SKILL,
             PLAYERHOOK_ON_UPDATE_SKILL
         }) { }
@@ -1465,7 +1465,7 @@ std::string GetWorldChatContext(Player const* player)
     if (!player || !player->IsInWorld())
         return {};
 
-    std::string const key = MakeGroupKey(player->GetGroup(), const_cast<Player*>(player));
+    std::string const key = MakeGroupKey(player->GetGroup(), player);
     {
         std::lock_guard<std::mutex> lock(chatContextMutex);
         auto context = chatContextByGroup.find(key);
