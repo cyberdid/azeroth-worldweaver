@@ -13,6 +13,7 @@ SCHEMA_VERSION = 1
 MAX_EVENTS = 100
 MAX_CONTEXT_CHARS = 256000
 MAX_INVENTORY_ITEMS_IN_CONTEXT_PER_MEMBER = 20
+MAX_SNAPSHOT_CLOCK_SKEW_SECONDS = 5.0
 MAX_EVENT_FILE_BYTES = 8 * 1024 * 1024
 MAX_EVENT_LINE_BYTES = 128 * 1024
 
@@ -63,11 +64,12 @@ def read_latest_snapshot(
         return None
 
     captured, path, snapshot = max(candidates, key=lambda row: row[0])
-    age = max(0.0, (time.time() * 1000 - captured) / 1000)
+    age = (time.time() * 1000 - captured) / 1000
     result = dict(snapshot)
     result["_telemetry_file"] = str(path)
     result["_age_seconds"] = round(age, 3)
-    result["_stale"] = age > 5.0
+    result["_clock_skew"] = age < -MAX_SNAPSHOT_CLOCK_SKEW_SECONDS
+    result["_stale"] = result["_clock_skew"] or age > MAX_SNAPSHOT_CLOCK_SKEW_SECONDS
     return result
 
 
@@ -283,6 +285,7 @@ def build_agent_context(
         "available": True,
         "freshness": "stale" if snapshot.get("_stale") else "fresh",
         "age_seconds": snapshot.get("_age_seconds"),
+        "clock_skew": bool(snapshot.get("_clock_skew", False)),
         "session_id": session,
         "group_id": group,
         "snapshot_seq": snapshot.get("snapshot_seq"),
@@ -366,6 +369,7 @@ def build_agent_context(
         "dropped_events_total": dropped_events,
         "snapshot_available": True,
         "snapshot_stale": bool(snapshot.get("_stale")),
+        "snapshot_clock_skew": bool(snapshot.get("_clock_skew", False)),
         "snapshot_age_seconds": snapshot.get("_age_seconds"),
     }
     return rendered, next_cursor
