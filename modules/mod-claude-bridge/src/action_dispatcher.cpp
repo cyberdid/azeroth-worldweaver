@@ -292,6 +292,18 @@ ActionResult DispatchTypedAction(std::string const& actorName, std::string const
     }
     lastActionByActor[rateKey] = now;
 
+    if (actionType == "stop_fishing")
+    {
+        // EndMasterFishingAction::isUseful() deliberately returns false while
+        // the bot is still at its fishing spot. A direct user stop must work
+        // there too, and must disable bobber auto-use along with fishing.
+        botAI->ChangeStrategy("-master fishing", BOT_STATE_NON_COMBAT);
+        botAI->ChangeStrategy("-use bobber", BOT_STATE_NON_COMBAT);
+        result.status = "accepted";
+        result.reasonCode = "strategies_cleared";
+        return Finish(requester, std::move(result), true);
+    }
+
     if (!botAI->DoSpecificAction(actionInfo->playerbotAction, Event(), true))
     {
         result.reasonCode = "action_unavailable";

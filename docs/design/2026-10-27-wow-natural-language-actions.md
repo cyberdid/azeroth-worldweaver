@@ -29,7 +29,7 @@ The first server allowlist is `follow`, `stay`, `attack_master_target`, `attack_
 
 ## Confirmed playerbot API mappings
 
-These names are registered in `modules/mod-playerbots/src/Ai/Base/ActionContext.h` and can be invoked through `PlayerbotAI::DoSpecificAction`. They are candidate primitive actions for the typed interface; the bridge still must validate the requester and actor before invocation.
+Most names are registered in `modules/mod-playerbots/src/Ai/Base/ActionContext.h` and are invoked through `PlayerbotAI::DoSpecificAction`. The bridge also has one fixed strategy operation for stopping fishing; the bridge validates the requester and actor before either path.
 
 | Typed intent | Playerbot action | Source behavior and required check |
 |---|---|---|
@@ -40,7 +40,7 @@ These names are registered in `modules/mod-playerbots/src/Ai/Base/ActionContext.
 | `loot_nearby` | `loot` | Existing loot selection and movement; keep its native item/loot rules. |
 | `fish_here` | `go fishing` | Uses `FishingAction`, checks fishable water/skill, equips a carried pole, then casts. It only starts if fishable water is within its search range; it does not navigate across a zone. |
 | `use_fishing_bobber` | `use fishing bobber` | Uses the bot-owned ready bobber found by playerbot AI. |
-| `stop_fishing` | `end master fishing` | Removes the master-fishing strategy. |
+| `stop_fishing` | Clear `master fishing` and `use bobber` strategies | Clears both directly so the command works while the bot is still at its fishing spot. The normal `end master fishing` action rejects that exact state as useless. |
 | `move_near_water` | `move near water` | Existing water-position action; intentionally excluded from the first allowlist until its movement/range behavior is reviewed. |
 
 Quest acceptance and turn-in are handled by playerbot RPG/quest actions when the bot interacts with a valid quest giver; no arbitrary quest ID is accepted by this initial primitive set. Direct spell/item use and named-coordinate travel remain unmapped until their exact APIs and checks are confirmed.
