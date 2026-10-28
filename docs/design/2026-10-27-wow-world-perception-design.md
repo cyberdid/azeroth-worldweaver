@@ -11,7 +11,7 @@ The user is the task authority. Claude and Codex control their existing playerbo
 
 ## Current state and constraints
 
-- The installed observer writes one shared snapshot per second while the bridge group is online. It includes group positions and state, equipment, skills, auras, quests, and up to 40 nearby same-phase creatures/game objects within 100 yards.
+- The installed observer writes one shared snapshot per second while the bridge group is online. It includes group positions and state, equipment, skills, auras, quests, and up to 100 nearby same-phase creatures/game objects within the member's 100-yard visibility range; `nearby_truncated` explicitly marks additional loaded objects beyond the configured cap.
 - The observer writes meaningful changes to a bounded event journal. The server also attaches a compact observation and stable snapshot/event/image/query paths to each authenticated incoming chat record; telemetry itself never starts a reply.
 - Separate Codex and Claude adapters read their respective bot logs, use the same snapshot/event reader, and preserve short chat history. Both require exact authorized-character allowlists. Codex attaches a verified image to `codex exec`; Claude uses Claude Code print mode with safe mode, read-only file tools, and a fixed-operation query client.
 - The server has script hooks for world ticks, unit combat/death, player spell casts, quest changes, loot, fishing-skill changes, creature spawn/despawn, and game-object spawn/despawn/state changes.

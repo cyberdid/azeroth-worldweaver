@@ -9,7 +9,7 @@ Give Claude and Codex the same fresh, bounded, live view of their current group 
 
 ## Current gap
 
-The `WorldScript` observer/writer is compiled, installed, and running on the author's private server. Before the latest restart, a fresh group snapshot confirmed inventory counters/items for all three members and attackability/trigger fields for nearby creatures, with zero event drops. The latest build adds server-side nearby overflow metadata; the server restarted successfully, but currently has zero online players, so a fresh snapshot is still needed to observe those fields. Both adapters have restarted, and their context builder preserved all 40 objects from the last live snapshot while correctly marking it stale.
+The `WorldScript` observer/writer is compiled, installed, and running on the author's private server. A live snapshot on 2026-10-28 (sequence 665, three online players) reported the configured cap of 100 and `nearby_truncated=true`. Codex and Claude's context readers both consumed that same sequence with all 100 listed objects, no context truncation, and no event drops; the rendered context was 61,646 characters. The server's latest measured `tick_p95_ms` was 5. More than 100 eligible loaded objects remain outside the prompt's inline list, so complete nearby-object access is still an open gap. A clean public install and live model-response validation remain unverified.
 
 ## Design
 

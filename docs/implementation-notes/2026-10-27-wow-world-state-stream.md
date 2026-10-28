@@ -86,7 +86,7 @@
 **Files:**
 - Modify: `./2026-10-27-wow-world-state-stream.md` only if observed behavior changes the contract.
 
-- [ ] After explicit approval, rebuild and restart worldserver.
+- [x] After explicit approval, rebuild and restart worldserver.
 - [ ] Join the configured user characters with Codex and Claude; confirm both report the same `schema_version`, `snapshot_seq`, and timestamp.
 - [ ] Move between areas and enter/exit combat; confirm both agents see the same state/event sequences on their next user-task response and neither replies to background telemetry alone.
 - [ ] Inspect queue/drop counters and bounded event rotation while playing; record measured cadence and any gaps.
@@ -104,4 +104,11 @@
 - Agent context raises its bounded character budget and moves repeated provenance, map, instance, and phase values into `snapshot.nearby_defaults` when those values are shared by all listed objects. This is lossless; later fallback compaction still records `nearby_context_truncated` if objects must be removed.
 - Both prompts distinguish server-side omissions from prompt-size omissions and inherit compacted record defaults explicitly.
 - `make -j20 worldserver` succeeded, the matching binary was installed, and the private server restarted. Both bridges restarted with the updated context reader. With the last live 40-object snapshot, both generated contexts include all 40 records at 34,974 characters and correctly mark the snapshot stale.
-- Runtime verification of `nearby_limit`/`nearby_truncated` remains pending because the server currently reports zero online players; confirm those fields in a fresh group snapshot after the characters reconnect, preferably in a dense area.
+- Runtime verification of `nearby_limit`/`nearby_truncated` was completed after the characters reconnected; the denser-area result is recorded in the follow-up below.
+
+### Follow-up: expand dense-area context on 2026-10-28
+
+- Raised the installed `TelemetryMaxObjects` setting from 40 to 100 through the module config and applied it with the server's `reload config` command; the worldserver process stayed up.
+- Raised the reader's bounded context budget from 36,000 to 64,000 characters and restarted only the two bridge consumers.
+- Fresh runtime evidence: three online players; both context readers consumed snapshot sequence 665 with 100 nearby records, `nearby_context_truncated=false`, and zero event drops. The rendered context was 61,646 characters and the server reported `nearby_truncated=true`; therefore at least one more eligible object exists beyond the 100-record cap.
+- The public module configuration defaults to 100 nearby objects, and the public reader uses a 64K context budget. A clean install is unverified. The next perception gap is access to loaded objects beyond the inline server cap.

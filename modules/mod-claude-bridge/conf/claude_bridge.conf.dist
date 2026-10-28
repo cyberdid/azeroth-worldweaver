@@ -46,9 +46,9 @@ ClaudeBridge.TelemetryRadius = 100
 #
 #    ClaudeBridge.TelemetryMaxObjects
 #        Description: Maximum nearby creatures and game objects serialized per snapshot (bounded to 1-100).
-#        Default:     40
+#        Default:     100
 #
-ClaudeBridge.TelemetryMaxObjects = 40
+ClaudeBridge.TelemetryMaxObjects = 100
 
 #
 #    ClaudeBridge.TelemetryEventQueueLimit
