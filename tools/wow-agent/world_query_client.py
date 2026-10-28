@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Submit a named read-only AzerothCore world-data lookup to the local bridge."""
+"""Run a typed read-only AzerothCore lookup or filter the latest live nearby snapshot."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import time
 import uuid
@@ -15,7 +16,11 @@ DEFAULT_TELEMETRY = Path(os.environ.get(
     "WOW_AGENT_TELEMETRY_DIR",
     Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "azeroth-worldweaver",
 ))
-OPERATIONS = ("creature", "gameobject", "spawns", "quest", "fishing", "loot", "item", "spell")
+OPERATIONS = ("creature", "gameobject", "spawns", "quest", "fishing", "loot", "item", "spell", "nearby")
+MAX_LIVE_SNAPSHOT_BYTES = 16 * 1024 * 1024
+MAX_LIVE_QUERY_ROWS = 50
+MAX_LIVE_QUERY_RESPONSE_BYTES = 32 * 1024
+MAX_LIVE_SNAPSHOT_AGE_SECONDS = 5.0
 
 
 def submit(operation: str, args: dict[str, Any], telemetry_dir: Path = DEFAULT_TELEMETRY,
@@ -64,6 +69,196 @@ def submit(operation: str, args: dict[str, Any], telemetry_dir: Path = DEFAULT_T
                 pass
 
 
+def _read_latest_live_snapshot(
+    telemetry_dir: Path, group_id: str | None
+) -> tuple[dict[str, Any] | None, float | None]:
+    if group_id is not None and (not group_id.isascii() or not group_id.isdigit()):
+        return None, None
+    try:
+        root = telemetry_dir.resolve()
+    except (OSError, RuntimeError):
+        return None, None
+    paths = ([telemetry_dir / f"world-state-{group_id}.json"] if group_id is not None
+             else list(telemetry_dir.glob("world-state-*.json")))
+    candidates: list[tuple[int, dict[str, Any]]] = []
+    for path in paths:
+        try:
+            if path.is_symlink() or path.parent.resolve() != root:
+                continue
+            if path.stat().st_size > MAX_LIVE_SNAPSHOT_BYTES:
+                continue
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, RuntimeError, UnicodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(value, dict) or value.get("schema_version") != 1:
+            continue
+        current_group = value.get("group_id")
+        session_id = value.get("session_id")
+        snapshot_seq = value.get("snapshot_seq")
+        captured = value.get("captured_at_unix_ms")
+        if (not isinstance(current_group, str) or not current_group.isascii() or not current_group.isdigit()
+                or (group_id is not None and current_group != group_id)
+                or not isinstance(session_id, str) or not session_id
+                or not isinstance(snapshot_seq, int) or isinstance(snapshot_seq, bool)
+                or not isinstance(captured, int) or isinstance(captured, bool)):
+            continue
+        candidates.append((captured, value))
+    if not candidates:
+        return None, None
+    captured, snapshot = max(candidates, key=lambda item: item[0])
+    age_seconds = (time.time() * 1000 - captured) / 1000
+    return snapshot, round(age_seconds, 3)
+
+
+def query_live_nearby(args: dict[str, Any], telemetry_dir: Path) -> dict[str, Any]:
+    """Filter and page the latest server-observed nearby objects without database access."""
+    operation = "nearby"
+    supported_args = {
+        "group_id", "kind", "entry", "name", "map_id", "radius", "limit", "offset",
+        "line_of_sight", "attackable_only", "fishing_only",
+    }
+
+    def error(code: str) -> dict[str, Any]:
+        return {"operation": operation, "provenance": "none", "results": [],
+                "truncated": False, "error": code}
+
+    if set(args) - supported_args:
+        return error("unsupported_filter")
+
+    configured_root = os.environ.get("WOW_AGENT_TELEMETRY_DIR")
+    if configured_root:
+        try:
+            if telemetry_dir.resolve() != Path(configured_root).resolve():
+                return error("telemetry_dir_not_allowed")
+        except (OSError, RuntimeError):
+            return error("telemetry_dir_not_allowed")
+
+    group_value = args.get("group_id")
+    group_id = str(group_value) if group_value is not None else None
+    if group_id is not None and (not group_id.isascii() or not group_id.isdigit()):
+        return error("invalid_group_id")
+
+    kind = args.get("kind")
+    if kind is not None and kind not in {"creature", "gameobject"}:
+        return error("invalid_kind")
+    name = args.get("name")
+    if name is not None and (not isinstance(name, str) or len(name) > 64):
+        return error("invalid_name")
+    name_match = name.casefold() if isinstance(name, str) else None
+
+    def integer_arg(value: Any, minimum: int, maximum: int) -> int | None:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return parsed if minimum <= parsed <= maximum else None
+
+    entry_filter = None
+    if args.get("entry") is not None:
+        entry_filter = integer_arg(args["entry"], 1, 0xFFFFFFFF)
+        if entry_filter is None:
+            return error("invalid_entry")
+    map_filter = None
+    if args.get("map_id") is not None:
+        map_filter = integer_arg(args["map_id"], 0, 0xFFFFFFFF)
+        if map_filter is None:
+            return error("invalid_map_id")
+    limit = integer_arg(args.get("limit", 20), 1, MAX_LIVE_QUERY_ROWS)
+    offset = integer_arg(args.get("offset", 0), 0, 100000)
+    if limit is None or offset is None:
+        return error("invalid_pagination")
+
+    radius: float | None = None
+    if args.get("radius") is not None:
+        try:
+            radius = float(args["radius"])
+        except (TypeError, ValueError, OverflowError):
+            return error("invalid_radius")
+        if not math.isfinite(radius) or not 0 <= radius <= 200:
+            return error("invalid_radius")
+
+    los_filter = args.get("line_of_sight")
+    if los_filter not in (None, "yes", "no"):
+        return error("invalid_line_of_sight")
+    attackable_only = args.get("attackable_only", False)
+    fishing_only = args.get("fishing_only", False)
+    if not isinstance(attackable_only, bool) or not isinstance(fishing_only, bool):
+        return error("invalid_filter")
+
+    snapshot, age_seconds = _read_latest_live_snapshot(telemetry_dir, group_id)
+    if snapshot is None or age_seconds is None:
+        return error("live_snapshot_unavailable")
+    nearby = snapshot.get("nearby")
+    if not isinstance(nearby, list):
+        return error("nearby_list_unavailable")
+
+    matches: list[dict[str, Any]] = []
+    for record in nearby:
+        if not isinstance(record, dict):
+            continue
+        if kind and record.get("type") != kind:
+            continue
+        if entry_filter is not None and record.get("entry") != entry_filter:
+            continue
+        if map_filter is not None and record.get("map_id") != map_filter:
+            continue
+        if name_match and name_match not in str(record.get("name", "")).casefold():
+            continue
+        try:
+            distance = float(record.get("distance"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(distance) or (radius is not None and distance > radius):
+            continue
+        if los_filter is not None and record.get("line_of_sight") != (los_filter == "yes"):
+            continue
+        if attackable_only and (record.get("type") != "creature"
+                                or record.get("attackable_by_nearest_member") is not True):
+            continue
+        if fishing_only and (record.get("type") != "gameobject"
+                             or not (record.get("fishing_node") is True
+                                     or record.get("fishing_hole") is True)):
+            continue
+        matches.append(record)
+
+    matches.sort(key=lambda record: float(record["distance"]))
+    page = matches[offset:offset + limit]
+    clock_skew = age_seconds < -MAX_LIVE_SNAPSHOT_AGE_SECONDS
+    result: dict[str, Any] = {
+        "operation": operation,
+        "provenance": "live_snapshot",
+        "available": True,
+        "stale": clock_skew or age_seconds > MAX_LIVE_SNAPSHOT_AGE_SECONDS,
+        "clock_skew": clock_skew,
+        "snapshot": {
+            "group_id": snapshot.get("group_id"),
+            "session_id": snapshot.get("session_id"),
+            "snapshot_seq": snapshot.get("snapshot_seq"),
+            "event_seq": snapshot.get("event_seq"),
+            "captured_at_unix_ms": snapshot.get("captured_at_unix_ms"),
+            "age_seconds": age_seconds,
+        },
+        "nearby_server_limit": snapshot.get("nearby_limit"),
+        "nearby_server_count": len(nearby),
+        "nearby_server_truncated": snapshot.get("nearby_truncated"),
+        "matching_count": len(matches),
+        "offset": offset,
+        "returned_count": len(page),
+        "truncated": offset + len(page) < len(matches),
+        "next_offset": offset + len(page) if offset + len(page) < len(matches) else None,
+        "results": page,
+    }
+    while len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > MAX_LIVE_QUERY_RESPONSE_BYTES:
+        if len(page) <= 1:
+            return error("response_too_large")
+        page = page[:len(page) // 2]
+        result["results"] = page
+        result["returned_count"] = len(page)
+        result["truncated"] = True
+        result["next_offset"] = offset + len(page)
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=OPERATIONS)
@@ -79,11 +274,27 @@ def main() -> int:
     parser.add_argument("--z")
     parser.add_argument("--radius")
     parser.add_argument("--limit", default="20")
+    parser.add_argument("--group-id")
+    parser.add_argument("--offset")
+    parser.add_argument("--line-of-sight", choices=("yes", "no"))
+    parser.add_argument("--attackable-only", action="store_true")
+    parser.add_argument("--fishing-only", action="store_true")
     parser.add_argument("--telemetry-dir", type=Path, default=DEFAULT_TELEMETRY)
     parsed = parser.parse_args()
-    args = {key: value for key, value in vars(parsed).items()
-            if key not in {"operation", "telemetry_dir"} and value is not None}
-    result = submit(parsed.operation, args, parsed.telemetry_dir)
+    if parsed.operation == "nearby":
+        args = {key: value for key, value in vars(parsed).items()
+                if key not in {"operation", "telemetry_dir"} and value is not None}
+        args["attackable_only"] = parsed.attackable_only
+        args["fishing_only"] = parsed.fishing_only
+        result = query_live_nearby(args, parsed.telemetry_dir)
+    else:
+        if (parsed.group_id is not None or parsed.offset is not None or parsed.line_of_sight is not None
+                or parsed.attackable_only or parsed.fishing_only):
+            parser.error("live nearby filters are only valid with the nearby operation")
+        args = {key: value for key, value in vars(parsed).items()
+                if key not in {"operation", "telemetry_dir", "group_id", "offset", "line_of_sight",
+                               "attackable_only", "fishing_only"} and value is not None}
+        result = submit(parsed.operation, args, parsed.telemetry_dir)
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     return 1 if "error" in result else 0
 

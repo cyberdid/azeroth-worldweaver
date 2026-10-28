@@ -27,9 +27,10 @@ This is a **public experimental snapshot**, not a ready-to-install release. The 
 | Capability | State in this snapshot |
 |---|---|
 | Fixed-operation, read-only world database lookups | Implemented; fishing and loot references can expand into bounded item rows |
+| Live nearby-object queries | Typed `nearby` helper filters and pages the latest group snapshot by kind, entry, name, radius, visibility, attackability, or fishing markers; page size is capped at 50 and freshness/truncation are explicit |
 | Shared request relay for an agent without database-file access | Available through fixed typed operations; both adapters can use the credential-free client |
 | Authenticated chat authority | Both adapters use a configurable exact sender allowlist; empty by default, so no character can start a task until configured |
-| World-state snapshot and event writer | Live on the author's private Playerbot server. After raising the configured cap to 100 and the prompt budget to 64K, both context readers consumed the same fresh snapshot (sequence 665): all 100 listed nearby records fit in 61,646 characters with no context truncation or event drops. The server still reports `nearby_truncated=true`, so more than 100 eligible objects are loaded nearby. A clean public install is unverified |
+| World-state snapshot and event writer | Private server rebuilt and restarted with a 500-object cap and 256K context budget. The latest verified pre-deploy snapshot had 100 records and `nearby_truncated=true`; post-restart group telemetry is pending player reconnection, so the new cap and load impact are not yet live-verified. Clean public install is unverified |
 | Screenshot capture | Verified locally against a live WoW X11 client; accepts only the active, verified game window and decodes TrueColor/DirectColor channels; Codex attaches frames, and the Claude adapter can read the same validated image path; Claude visual delivery still needs a live check |
 | Ordinary-language requests converted into fully validated game actions | Design and initial playerbot action mappings are documented; the typed server dispatcher is not implemented |
 | End-to-end in-game validation | Shared telemetry and Codex visual capture were observed live; the Claude chat adapter is running but has not handled a fresh game message yet |
@@ -107,7 +108,7 @@ WOW_SERVER_CONFIG=/path/to/worldserver.conf \
   python3 -I tools/wow-agent/world_query.py creature --name "Wind Serpent"
 ```
 
-Available operations: `creature`, `gameobject`, `spawns`, `quest`, `fishing`, `loot`, `item`, and `spell`. Results are bounded. Fishing and loot reference tables expand only to a capped depth and row count; their raw chance fields are not a final drop probability. Static spawns remain `loaded: unknown` until corroborated by live telemetry.
+The shared adapter helper also provides `nearby`, which reads only the current server snapshot, returns `live_snapshot` provenance and freshness metadata, and supports bounded filtering and pagination. Follow its returned `next_offset`; the server may still report omitted objects when its configured cap is reached. Static operations are `creature`, `gameobject`, `spawns`, `quest`, `fishing`, `loot`, `item`, and `spell`. Results are bounded. Fishing and loot reference tables expand only to a capped depth and row count; their raw chance fields are not a final drop probability. Static spawns remain `loaded: unknown` until corroborated by live telemetry.
 
 When Claude cannot read the server configuration, the Codex bridge can expose a credential-free request client through the private telemetry directory. Requests contain an operation name and typed arguments, not SQL.
 

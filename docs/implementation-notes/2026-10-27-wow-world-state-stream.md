@@ -111,4 +111,12 @@
 - Raised the installed `TelemetryMaxObjects` setting from 40 to 100 through the module config and applied it with the server's `reload config` command; the worldserver process stayed up.
 - Raised the reader's bounded context budget from 36,000 to 64,000 characters and restarted only the two bridge consumers.
 - Fresh runtime evidence: three online players; both context readers consumed snapshot sequence 665 with 100 nearby records, `nearby_context_truncated=false`, and zero event drops. The rendered context was 61,646 characters and the server reported `nearby_truncated=true`; therefore at least one more eligible object exists beyond the 100-record cap.
-- The public module configuration defaults to 100 nearby objects, and the public reader uses a 64K context budget. A clean install is unverified. The next perception gap is access to loaded objects beyond the inline server cap.
+- At that point the public module configuration default was 100 objects and the public reader budget was 64K. The next gap was access beyond the inline server cap.
+
+### Follow-up: paged nearby access and expanded cap on 2026-10-28
+
+- Added a read-only `nearby` operation that filters and pages the newest group snapshot, with `live_snapshot` provenance, group/session/sequence, age and clock-skew status, server truncation metadata, response-size bounds, and an exact `next_offset` for continuation. Unsupported static-only filters fail explicitly. Both agent prompts explain how to use the operation and avoid absence claims when server-side data is truncated.
+- Raised the module configuration range/default and live `TelemetryMaxObjects` value to 500; raised the context budget to 256,000 characters. The C++ module compiled successfully with `make -j20 worldserver`; the binary and four Python helpers/adapters were installed, then the worldserver and both bridges restarted. The worldserver reported ready in 23 seconds.
+- Timestamped local backups were made before deployment. No database, spell files, or user spell changes were modified.
+- Post-restart bridge processes are running, but no fresh group snapshot has been written yet; the latest file is from before the restart. The client process remains open, and the characters must reconnect before validating the 500-object cap, shared context, and tick cost. The code review found no critical or important issues; its remaining performance recommendation is to inspect `tick_p95_ms` in a dense area after fresh telemetry resumes.
+- A clean public install and fresh model response remain unverified.

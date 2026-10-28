@@ -51,7 +51,7 @@ namespace
     constexpr uint32 TELEMETRY_SCHEMA_VERSION = 1;
     constexpr uint32 DEFAULT_TELEMETRY_INTERVAL_MS = 1000;
     constexpr float DEFAULT_TELEMETRY_RADIUS = 100.0f;
-    constexpr uint32 DEFAULT_MAX_NEARBY_OBJECTS = 40;
+    constexpr uint32 DEFAULT_MAX_NEARBY_OBJECTS = 500;
     constexpr uint32 MAX_AURAS_IN_SNAPSHOT = 32;
     constexpr uint32 MAX_INVENTORY_ITEMS_IN_SNAPSHOT = 60;
     constexpr std::size_t MAX_CONFIGURED_BOTS = 16;
@@ -1265,7 +1265,7 @@ namespace
             _elapsed %= interval;
 
             uint32 maxObjects = sConfigMgr->GetOption<uint32>("ClaudeBridge.TelemetryMaxObjects", DEFAULT_MAX_NEARBY_OBJECTS);
-            maxObjects = std::max<uint32>(1, std::min<uint32>(maxObjects, 100));
+            maxObjects = std::max<uint32>(1, std::min<uint32>(maxObjects, 500));
             float radius = sConfigMgr->GetOption<float>("ClaudeBridge.TelemetryRadius", DEFAULT_TELEMETRY_RADIUS);
             radius = std::max(10.0f, std::min(radius, 200.0f));
             std::vector<GroupContext> const activeContexts = GetActiveGroupContexts();
