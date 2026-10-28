@@ -963,6 +963,7 @@ namespace
             {
                 CreatureTemplate const* creatureTemplate = creature->GetCreatureTemplate();
                 std::vector<std::string> const npcRoles = GetNpcRoles(creature);
+                bool const attackableByNearestMember = nearest->IsValidAttackTarget(creature);
                 out << ",\"type\":\"creature\",\"name\":\"" << JsonEscape(creature->GetNameForLocaleIdx(locale))
                     << "\",\"entry\":" << creature->GetEntry()
                     << ",\"level\":" << unsigned(creature->GetLevel())
@@ -970,12 +971,14 @@ namespace
                     << ",\"rank\":" << (creatureTemplate ? unsigned(creatureTemplate->rank) : 0)
                     << ",\"faction_id\":" << creature->GetFaction()
                     << ",\"npc_flags\":" << static_cast<uint32>(creature->GetNpcFlags())
+                    << ",\"is_trigger\":" << (creature->IsTrigger() ? "true" : "false")
                     << ",\"npc_roles\":";
                 AppendNpcRolesJson(out, npcRoles);
                 out << ",\"health_pct\":" << creature->GetHealthPct()
                     << ",\"alive\":" << (creature->IsAlive() ? "true" : "false")
                     << ",\"in_combat\":" << (creature->IsInCombat() ? "true" : "false")
                     << ",\"hostile_to_nearest_member\":" << (creature->IsHostileTo(nearest) ? "true" : "false")
+                    << ",\"attackable_by_nearest_member\":" << (attackableByNearestMember ? "true" : "false")
                     << ",\"victim\":\"" << JsonEscape(creature->GetVictim() ? creature->GetVictim()->GetNameForLocaleIdx(locale) : "") << '"';
             }
             else if (GameObject* gameObject = object->ToGameObject())
@@ -1005,7 +1008,9 @@ namespace
                     << " creature_type=" << creature->GetCreatureType()
                     << " rank=" << (creatureTemplate ? unsigned(creatureTemplate->rank) : 0)
                     << " hp=" << unsigned(creature->GetHealthPct()) << "% alive=" << (creature->IsAlive() ? "yes" : "no")
-                    << " hostile=" << (creature->IsHostileTo(nearest) ? "yes" : "no");
+                    << " hostile=" << (creature->IsHostileTo(nearest) ? "yes" : "no")
+                    << " attackable=" << (attackableByNearestMember ? "yes" : "no")
+                    << " trigger=" << (creature->IsTrigger() ? "yes" : "no");
                 if (!npcRoles.empty())
                 {
                     compact << " roles=";

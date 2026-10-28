@@ -29,7 +29,7 @@ This is a **public experimental snapshot**, not a ready-to-install release. The 
 | Fixed-operation, read-only world database lookups | Implemented; fishing and loot references can expand into bounded item rows |
 | Shared request relay for an agent without database-file access | Available through fixed typed operations; both adapters can use the credential-free client |
 | Authenticated chat authority | Both adapters use a configurable exact sender allowlist; empty by default, so no character can start a task until configured |
-| World-state snapshot and event writer | Compiled and installed on the author's private Playerbot server; one-second snapshots and live events are being written. Backpack/equipped-bag enumeration has a source fix pending operator-approved rebuild and restart; a clean public install is unverified |
+| World-state snapshot and event writer | Compiled and installed on the author's private Playerbot server; one-second snapshots and live events are being written. Backpack/equipped-bag enumeration and creature trigger/attack-validity fields have source fixes pending operator-approved rebuild and restart; a clean public install is unverified |
 | Screenshot capture | Verified locally against a live WoW X11 client; accepts only the active, verified game window and decodes TrueColor/DirectColor channels; Codex attaches frames, and the Claude adapter can read the same validated image path; Claude visual delivery still needs a live check |
 | Ordinary-language requests converted into fully validated game actions | Design and initial playerbot action mappings are documented; the typed server dispatcher is not implemented |
 | End-to-end in-game validation | Shared telemetry and Codex visual capture were observed live; the Claude chat adapter is running but has not handled a fresh game message yet |
@@ -40,6 +40,7 @@ This AzerothCore tree discovers module directories from their source layout and 
 
 - **One shared view:** Claude and Codex should consume the same snapshot sequence and event journal.
 - **Evidence with provenance:** live objects, static database templates, and static spawn rows are labeled separately. A database spawn row does not prove that an NPC is loaded or visible now.
+- **Actionable creature state:** faction hostility, attack validity for the nearest group member, trigger status, and line of sight are distinct observations.
 - **Freshness is explicit:** snapshots have age and sequence metadata; stale, missing, or truncated data stays unknown.
 - **Bounded reads:** agents request named operations such as `creature`, `quest`, `fishing`, or `loot`. The relay does not accept SQL text and does not copy database credentials into the shared directory.
 - **Window-only images:** screenshots are accepted only from the active, mapped WoW window after checking its process identity. Obscured-window captures are refused, and X11 DirectColor channels are decoded by their visual masks. The helper does not capture the desktop.
