@@ -663,6 +663,41 @@ namespace
         }
     };
 
+    void AppendQuestObjectiveDetails(std::ostream& out, Quest const* quest, QuestStatusData const* status)
+    {
+        out << ",\"item_objectives\":[";
+        bool first = true;
+        if (quest)
+            for (uint8 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
+                if (quest->RequiredItemId[i] && quest->RequiredItemCount[i])
+                {
+                    if (!first)
+                        out << ',';
+                    first = false;
+                    out << "{\"entry\":" << quest->RequiredItemId[i]
+                        << ",\"current\":" << (status ? status->ItemCount[i] : 0)
+                        << ",\"required\":" << quest->RequiredItemCount[i] << '}';
+                }
+
+        out << "],\"creature_objectives\":[";
+        first = true;
+        if (quest)
+            for (uint8 i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+                if (quest->RequiredNpcOrGo[i] && quest->RequiredNpcOrGoCount[i])
+                {
+                    if (!first)
+                        out << ',';
+                    first = false;
+                    int32 const target = quest->RequiredNpcOrGo[i];
+                    uint32 const entry = static_cast<uint32>(target > 0 ? target : -target);
+                    out << "{\"type\":\"" << (target > 0 ? "creature" : "gameobject")
+                        << "\",\"entry\":" << entry
+                        << ",\"current\":" << (status ? status->CreatureOrGOCount[i] : 0)
+                        << ",\"required\":" << quest->RequiredNpcOrGoCount[i] << '}';
+                }
+        out << ']';
+    }
+
     std::string BuildSnapshot(GroupContext const& context, uint64 snapshotSeq, uint64 eventSeq,
         uint32 maxNearbyObjects, float configuredRadius, std::string& compactContext)
     {
@@ -894,6 +929,7 @@ namespace
                 Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
                 QuestStatusMap const& statuses = member->getQuestStatusMap();
                 auto status = statuses.find(questId);
+                QuestStatusData const* statusData = status == statuses.end() ? nullptr : &status->second;
                 out << "{\"id\":" << questId
                     << ",\"title\":\"" << JsonEscape(quest ? quest->GetTitle() : "Unknown")
                     << "\",\"status\":" << unsigned(status == statuses.end() ? QUEST_STATUS_NONE : status->second.Status)
@@ -911,7 +947,9 @@ namespace
                         out << ',';
                     out << (status == statuses.end() ? 0 : status->second.CreatureOrGOCount[i]);
                 }
-                out << "],\"explored\":" << (status != statuses.end() && status->second.Explored ? "true" : "false") << '}';
+                out << ']';
+                AppendQuestObjectiveDetails(out, quest, statusData);
+                out << ",\"explored\":" << (statusData && statusData->Explored ? "true" : "false") << '}';
             }
             out << ']';
 
@@ -1129,7 +1167,9 @@ namespace
                     payload << ',';
                 payload << (data ? data->CreatureOrGOCount[i] : 0);
             }
-            payload << "],\"explored\":" << (data && data->Explored ? "true" : "false") << '}';
+            payload << ']';
+            AppendQuestObjectiveDetails(payload, quest, data);
+            payload << ",\"explored\":" << (data && data->Explored ? "true" : "false") << '}';
             progress.emplace(questId, payload.str());
         }
         return progress;
