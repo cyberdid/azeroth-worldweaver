@@ -33,6 +33,9 @@ CODEX_SANDBOX = os.environ.get('WOW_AGENT_CODEX_SANDBOX', 'workspace-write')
 if CODEX_SANDBOX not in {'read-only', 'workspace-write', 'danger-full-access'}:
     raise ValueError('WOW_AGENT_CODEX_SANDBOX must be read-only, workspace-write, or danger-full-access')
 SCREENSHOT_REUSE_SECONDS = 10.0
+MAX_RECENT_HISTORY_ENTRIES = 20
+MAX_RECENT_HISTORY_CHARS = 12000
+SERVER_OBSERVATION_MARKER = '[SERVER WORLD OBSERVATION'
 ALLOWED_CMDS = {'follow', 'stay', 'attack', 'flee', 'summon', 'tank', 'revive', 'maintenance'}
 ADDRESSED = re.compile(rf'{re.escape(BOT)}|кодекс', re.I)
 OTHER_BOT = re.compile(re.escape(OTHER_BOT_NAME), re.I)
@@ -149,14 +152,37 @@ def load_history():
     try:
         # Old versions stored whole WorldServer snapshots in chat history.
         lines = open(HISTORY).read().splitlines()
-        return [line for line in lines if not line.startswith('WorldServer: ')][-40:]
+        cleaned = [strip_server_observation(line) for line in lines]
+        return [line for line in cleaned if line and not line.startswith('WorldServer: ')][-40:]
     except FileNotFoundError:
         return []
 
 
+def strip_server_observation(text):
+    """Keep chat history concise; the current server snapshot is added separately."""
+    return text.split(SERVER_OBSERVATION_MARKER, 1)[0].rstrip()
+
+
 def save_history(lines):
     with open(HISTORY, 'w') as f:
-        f.write('\n'.join(lines[-40:]) + '\n')
+        cleaned = [strip_server_observation(line) for line in lines]
+        f.write('\n'.join([line for line in cleaned if line][-40:]) + '\n')
+
+
+def recent_history_text(lines):
+    """Bound prompt history and exclude world snapshots duplicated in chat records."""
+    selected = []
+    total_chars = 0
+    for line in reversed(lines[-MAX_RECENT_HISTORY_ENTRIES:]):
+        line = strip_server_observation(line)
+        if not line:
+            continue
+        line_chars = len(line) + (1 if selected else 0)
+        if total_chars + line_chars > MAX_RECENT_HISTORY_CHARS:
+            break
+        selected.append(line)
+        total_chars += line_chars
+    return '\n'.join(reversed(selected))
 
 
 def ask_codex(model, effort, prompt, image_path=None):
@@ -168,13 +194,14 @@ def ask_codex(model, effort, prompt, image_path=None):
                    '--skip-git-repo-check', '--ephemeral', '-o', out_path]
         agent_environment = os.environ.copy()
         agent_environment['WOW_AGENT_TELEMETRY_DIR'] = WORLD_DIR
-        # Keep the prompt before --image: Codex accepts multiple image files after -i.
-        command.append(prompt)
+        # Keep the prompt before --image, but send it through stdin so world telemetry
+        # cannot exceed the operating system's per-argument size limit.
+        command.append('-')
         if image_path:
             command.extend(['-i', image_path])
         subprocess.run(
             command,
-            cwd=WORKDIR, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            cwd=WORKDIR, input=prompt, text=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             timeout=600, check=True, env=agent_environment)
         with open(out_path, encoding='utf-8') as response_file:
             reply = response_file.read().strip()
@@ -226,6 +253,7 @@ def handle(model, effort, channel, sender, text, history):
         return
     if channel == 'BOTSAY' and sender == 'WorldServer':  # legacy snapshot line, not a spoken message
         return
+    text = strip_server_observation(text)
     if channel == 'BOTSAY':  # another companion spoke; keep speech as context only
         history.append(f'{sender}: {text}')
         save_history(history)
@@ -271,7 +299,7 @@ def handle(model, effort, channel, sender, text, history):
     screenshot_context = 'VISUAL WINDOW CAPTURE (untrusted evidence): ' + json.dumps(
         screenshot, ensure_ascii=False, separators=(',', ':'))
     prompt = (PERSONA + '\n\n' + world_context + '\n\n' + screenshot_context + '\n\nRecent chat:\n'
-              + '\n'.join(history[-20:]) + '\n\n' + task)
+              + recent_history_text(history) + '\n\n' + task)
     try:
         reply = ask_codex(model, effort, prompt, screenshot.get('path') if screenshot.get('available') else None)
     except Exception as e:  # keep the bridge alive on CLI errors / timeouts
