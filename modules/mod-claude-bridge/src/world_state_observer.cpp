@@ -1,5 +1,6 @@
 #include "AllCreatureScript.h"
 #include "AllGameObjectScript.h"
+#include "Bag.h"
 #include "CellImpl.h"
 #include "Config.h"
 #include "Creature.h"
@@ -775,21 +776,45 @@ namespace
             out << ']';
 
             out << ",\"inventory\":[";
-            firstItem = true;
-            uint32 inventoryCount = 0;
-            for (uint16 slot = PLAYER_SLOT_START; slot < PLAYER_SLOT_END && inventoryCount < MAX_INVENTORY_ITEMS_IN_SNAPSHOT; ++slot)
-                if (Item* item = member->GetItemByPos(slot))
+            bool inventoryFirstItem = true;
+            uint32 inventoryStacksTotal = 0;
+            uint32 inventoryStacksEmitted = 0;
+            auto appendInventoryItem = [&](Item* item, uint8 bagSlot, uint32 itemSlot)
+            {
+                if (!item)
+                    return;
+
+                ++inventoryStacksTotal;
+                if (inventoryStacksEmitted >= MAX_INVENTORY_ITEMS_IN_SNAPSHOT)
+                    return;
+
+                if (!inventoryFirstItem)
+                    out << ',';
+                inventoryFirstItem = false;
+                ++inventoryStacksEmitted;
+                ItemTemplate const* itemTemplate = item->GetTemplate();
+                out << "{\"bag\":" << unsigned(bagSlot) << ",\"slot\":" << itemSlot
+                    << ",\"entry\":" << item->GetEntry()
+                    << ",\"name\":\"" << JsonEscape(itemTemplate ? itemTemplate->Name1 : "Unknown")
+                    << "\",\"count\":" << item->GetCount() << '}';
+            };
+
+            // Main backpack slots use bag 255; raw slot IDs passed to the one-argument
+            // GetItemByPos overload are interpreted as encoded bag/slot pairs and return null.
+            for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+                appendInventoryItem(member->GetItemByPos(INVENTORY_SLOT_BAG_0, slot), INVENTORY_SLOT_BAG_0, slot);
+
+            // Include contents of each equipped bag, but not bank contents.
+            for (uint8 bagSlot = INVENTORY_SLOT_BAG_START; bagSlot < INVENTORY_SLOT_BAG_END; ++bagSlot)
+                if (Bag* bag = member->GetBagByPos(bagSlot))
                 {
-                    if (!firstItem)
-                        out << ',';
-                    firstItem = false;
-                    ++inventoryCount;
-                    ItemTemplate const* itemTemplate = item->GetTemplate();
-                    out << "{\"slot\":" << slot << ",\"entry\":" << item->GetEntry()
-                        << ",\"name\":\"" << JsonEscape(itemTemplate ? itemTemplate->Name1 : "Unknown")
-                        << "\",\"count\":" << item->GetCount() << '}';
+                    for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
+                        appendInventoryItem(member->GetItemByPos(bagSlot, static_cast<uint8>(slot)), bagSlot, slot);
                 }
-            out << ']';
+
+            out << "],\"inventory_stacks_total\":" << inventoryStacksTotal
+                << ",\"inventory_truncated\":"
+                << (inventoryStacksTotal > inventoryStacksEmitted ? "true" : "false");
 
             out << ",\"auras\":[";
             bool firstAura = true;

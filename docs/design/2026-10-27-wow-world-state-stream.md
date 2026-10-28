@@ -14,7 +14,7 @@ The installed server binary is stale: its chat hook serializes snapshots synchro
 ## Design
 
 - Add a `WorldScript` observer that finds online groups containing configured bridge bots, samples them at a configurable interval (default 1000 ms), and serializes only bounded data on the world thread.
-- Keep a latest snapshot per bridge group. Include schema version, snapshot sequence, latest event sequence, capture time, group/map/instance identity, member vitals/position/combat/target/cast, selected gear/skills/auras/quests, and up to a configurable number of nearby loaded creatures and game objects in the same map, instance, and core-defined phase relation.
+- Keep a latest snapshot per bridge group. Include schema version, snapshot sequence, latest event sequence, capture time, group/map/instance identity, member vitals/position/combat/target/cast, selected gear, backpack and equipped-bag item stacks (with bag/slot and an explicit truncation flag), skills/auras/quests, and up to a configurable number of nearby loaded creatures and game objects in the same map, instance, and core-defined phase relation.
 - Preserve `live` provenance on observed objects. Distances, line of sight, phase, combat/victim, and object state describe loaded objects only.
 - Creature records include live NPC service-role names, raw NPC flags, creature type, rank, and faction. Game-object records include type, fishing-node/fishing-hole indicators, loot state, and spawned state. Member context includes fishing skill and main-hand item; selected targets include player/creature kind, hostility, combat, and line of sight; casts and auras include localized names. NPC service flags are clues only and do not prove that a particular quest is currently available.
 - Emit compact event records for map/area change, target/combat/cast, player death/kill, quest, inventory/equipment, loot, fishing/skill, and nearby spawn/despawn/state changes. Events use a separate strictly increasing `event_seq`; snapshots reference the highest event sequence they include.
@@ -24,6 +24,7 @@ The installed server binary is stale: its chat hook serializes snapshots synchro
 - Do not append event records as separate chat-log lines. When a real user message is logged for Claude, append a compact cached observation and the shared snapshot path to that same record. Codex receives the plain user message and reads the shared snapshot plus events since its cursor when the message arrives.
 - Existing `BOTSAY` lines remain reserved for bot speech. A telemetry record never triggers an agent response.
 - Codex selects only the newest snapshot whose group contains the `Codex` member. Its reader reports confirmed journal gaps and writer/observer drop-counter increases separately from a backlog where the snapshot is ahead of the asynchronously written event journal.
+- Prompt-size compaction removes auras and older events first; it preserves equipment and inventory where possible, and explicitly marks any context-only inventory or nearby-object truncation.
 - Store the shared telemetry directory under Claude's active working tree (default deployment path: `~/.local/state/azeroth-worldweaver`) so both agents can read it without changing AppArmor policy.
 
 ## Failure and load behavior
