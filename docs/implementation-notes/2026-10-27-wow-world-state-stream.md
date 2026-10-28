@@ -71,7 +71,7 @@
 
 **Interfaces:**
 - `read_latest_snapshot(directory, group=None, member_name=None) -> dict | None` validates schema, optionally pins the member's group, and reports age.
-- `read_events(directory, group, session_id, after_event_seq, limit=100) -> (list[dict], int, bool, int)` returns matching events, the next cursor, a journal-gap flag, and the highest available sequence.
+- `read_events(directory, group, session_id, after_event_seq, limit=100) -> (list[dict], int, bool, int, bool)` returns the newest bounded unseen events, next cursor, journal-gap flag, highest available sequence, and whether older history was omitted.
 - `build_agent_context(directory, cursor, event_limit=40, member_name=None) -> (str, dict)` returns bounded state/events and an updated cursor; the Codex service pins it to member `Codex`.
 - Codex prompt context contains one current snapshot plus unseen compact events; those records are excluded from chat history and never invoke a response alone.
 
@@ -91,3 +91,9 @@
 - [ ] Move between areas and enter/exit combat; confirm both agents see the same state/event sequences on their next user-task response and neither replies to background telemetry alone.
 - [ ] Inspect queue/drop counters and bounded event rotation while playing; record measured cadence and any gaps.
 - [ ] Mark acceptance criteria complete only for behavior observed in the live server.
+
+### Follow-up: resume from the newest event tail
+
+- Fresh or badly lagging cursors now select the newest bounded event tail, avoiding repeated prompts that replay old journal entries while newer activity remains unseen.
+- Context exposes `event_history_truncated` when the journal begins after sequence 1, the reader skips older unseen entries to catch up, or prompt-size compaction removes events. Both bridge prompts direct agents to use the latest snapshot for current state when this flag is set.
+- Focused and full unit suites pass for the reader change. Both live bridge consumers need a restart to load it; actual post-deploy in-game chat remains to be observed.
