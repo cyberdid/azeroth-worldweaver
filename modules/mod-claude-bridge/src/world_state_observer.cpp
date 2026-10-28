@@ -208,6 +208,26 @@ namespace
         }
     }
 
+    char const* QuestDialogStatusName(QuestGiverStatus status)
+    {
+        switch (status)
+        {
+            case DIALOG_STATUS_NONE: return "none";
+            case DIALOG_STATUS_UNAVAILABLE: return "unavailable";
+            case DIALOG_STATUS_LOW_LEVEL_AVAILABLE: return "low_level_available";
+            case DIALOG_STATUS_LOW_LEVEL_REWARD_REP: return "low_level_repeatable_reward";
+            case DIALOG_STATUS_LOW_LEVEL_AVAILABLE_REP: return "low_level_repeatable_available";
+            case DIALOG_STATUS_INCOMPLETE: return "incomplete";
+            case DIALOG_STATUS_REWARD_REP: return "repeatable_reward";
+            case DIALOG_STATUS_AVAILABLE_REP: return "repeatable_available";
+            case DIALOG_STATUS_AVAILABLE: return "available";
+            case DIALOG_STATUS_REWARD2: return "reward_no_minimap_dot";
+            case DIALOG_STATUS_REWARD: return "reward";
+            case DIALOG_STATUS_SCRIPTED_NO_STATUS: return "scripted_unknown";
+            default: return "unknown";
+        }
+    }
+
     std::vector<std::string> GetNpcRoles(Creature const* creature)
     {
         std::vector<std::string> roles;
@@ -1089,6 +1109,32 @@ namespace
                     << ",\"is_trigger\":" << (creature->IsTrigger() ? "true" : "false")
                     << ",\"npc_roles\":";
                 AppendNpcRolesJson(out, npcRoles);
+                if (creature->IsQuestGiver())
+                {
+                    out << ",\"quest_dialog_by_member\":[";
+                    bool firstQuestStatus = true;
+                    for (Player* questMember : context.members)
+                    {
+                        if (!questMember || !questMember->IsInWorld()
+                            || questMember->GetMapId() != creature->GetMapId()
+                            || questMember->GetInstanceId() != creature->GetInstanceId()
+                            || !questMember->InSamePhase(creature))
+                            continue;
+
+                        QuestGiverStatus const status = questMember->GetQuestDialogStatus(creature);
+                        if (!firstQuestStatus)
+                            out << ',';
+                        firstQuestStatus = false;
+                        out << "{\"member\":\"" << JsonEscape(questMember->GetName())
+                            << "\",\"member_guid\":\"" << questMember->GetGUID().GetRawValue()
+                            << "\",\"status\":\"" << QuestDialogStatusName(status)
+                            << "\",\"status_id\":" << unsigned(status)
+                            << ",\"distance\":" << questMember->GetDistance(creature)
+                            << ",\"line_of_sight\":" << (questMember->IsWithinLOSInMap(creature) ? "true" : "false")
+                            << '}';
+                    }
+                    out << ']';
+                }
                 out << ",\"health_pct\":" << creature->GetHealthPct()
                     << ",\"alive\":" << (creature->IsAlive() ? "true" : "false")
                     << ",\"in_combat\":" << (creature->IsInCombat() ? "true" : "false")
