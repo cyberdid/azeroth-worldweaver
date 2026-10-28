@@ -193,6 +193,21 @@ namespace
         return escaped;
     }
 
+    char const* PowerTypeName(Powers power)
+    {
+        switch (power)
+        {
+            case POWER_MANA: return "mana";
+            case POWER_RAGE: return "rage";
+            case POWER_FOCUS: return "focus";
+            case POWER_ENERGY: return "energy";
+            case POWER_HAPPINESS: return "happiness";
+            case POWER_RUNE: return "runes";
+            case POWER_RUNIC_POWER: return "runic_power";
+            default: return "unknown";
+        }
+    }
+
     std::vector<std::string> GetNpcRoles(Creature const* creature)
     {
         std::vector<std::string> roles;
@@ -754,6 +769,7 @@ namespace
             Spell* channelCast = member->GetCurrentSpell(CURRENT_CHANNELED_SPELL);
 
             out << "{\"name\":\"" << JsonEscape(member->GetName())
+                << "\",\"guid\":\"" << member->GetGUID().GetRawValue()
                 << "\",\"bridge_bot\":" << (IsBridgeBot(member->GetName()) ? "true" : "false")
                 << ",\"playerbot\":";
             if (botAI)
@@ -789,6 +805,11 @@ namespace
                 << ",\"pct\":" << member->GetHealthPct() << '}'
                 << ",\"mana\":{\"current\":" << member->GetPower(POWER_MANA) << ",\"max\":" << member->GetMaxPower(POWER_MANA)
                 << ",\"pct\":" << member->GetPowerPct(POWER_MANA) << '}'
+                << ",\"power\":{\"type_id\":" << unsigned(member->getPowerType())
+                << ",\"type\":\"" << PowerTypeName(member->getPowerType())
+                << "\",\"current\":" << member->GetPower(member->getPowerType())
+                << ",\"max\":" << member->GetMaxPower(member->getPowerType())
+                << ",\"pct\":" << member->GetPowerPct(member->getPowerType()) << '}'
                 << ",\"alive\":" << (member->IsAlive() ? "true" : "false")
                 << ",\"in_combat\":" << (member->IsInCombat() ? "true" : "false")
                 << ",\"target\":";
@@ -1044,13 +1065,15 @@ namespace
             if (i)
                 out << ',';
 
-            out << "{\"source\":\"live\",\"loaded\":true,\"phase_mask\":" << object->GetPhaseMask()
+            out << "{\"source\":\"live\",\"loaded\":true,\"guid\":\""
+                << object->GetGUID().GetRawValue() << "\",\"phase_mask\":" << object->GetPhaseMask()
                 << ",\"line_of_sight\":" << (lineOfSight ? "true" : "false")
                 << ",\"position\":[" << object->GetPositionX() << ',' << object->GetPositionY() << ',' << object->GetPositionZ()
                 << "],\"orientation\":" << object->GetOrientation()
                 << ",\"map_id\":" << object->GetMapId() << ",\"instance_id\":" << object->GetInstanceId()
                 << ",\"distance\":" << nearbyRecords[i].distance
-                << ",\"nearest_member\":\"" << JsonEscape(nearest->GetName()) << "\"";
+                << ",\"nearest_member\":\"" << JsonEscape(nearest->GetName())
+                << "\",\"nearest_member_guid\":\"" << nearest->GetGUID().GetRawValue() << "\"";
 
             if (creature)
             {
@@ -1071,9 +1094,17 @@ namespace
                     << ",\"in_combat\":" << (creature->IsInCombat() ? "true" : "false")
                     << ",\"hostile_to_nearest_member\":" << (creature->IsHostileTo(nearest) ? "true" : "false")
                     << ",\"attackable_by_nearest_member\":" << (attackableByNearestMember ? "true" : "false")
-                    << ",\"victim\":\"" << JsonEscape(creature->GetVictim() ? creature->GetVictim()->GetNameForLocaleIdx(locale) : "") << '"';
+                    << ",\"victim\":\"" << JsonEscape(creature->GetVictim() ? creature->GetVictim()->GetNameForLocaleIdx(locale) : "") << '"'
+                    << ",\"controller\":";
+                if (Unit* controller = creature->GetCharmerOrOwner())
+                    out << "{\"guid\":\"" << controller->GetGUID().GetRawValue()
+                        << "\",\"name\":\"" << JsonEscape(controller->GetNameForLocaleIdx(locale)) << "\"}";
+                else
+                    out << "null";
             }
             else if (GameObject* gameObject = object->ToGameObject())
+            {
+                ObjectGuid const ownerGuid = gameObject->GetOwnerGUID();
                 out << ",\"type\":\"gameobject\",\"name\":\"" << JsonEscape(gameObject->GetNameForLocaleIdx(locale))
                     << "\",\"entry\":" << gameObject->GetEntry()
                     << ",\"state\":" << unsigned(gameObject->GetGoState())
@@ -1081,7 +1112,17 @@ namespace
                     << ",\"fishing_node\":" << (gameObject->GetGoType() == GAMEOBJECT_TYPE_FISHINGNODE ? "true" : "false")
                     << ",\"fishing_hole\":" << (gameObject->GetGoType() == GAMEOBJECT_TYPE_FISHINGHOLE ? "true" : "false")
                     << ",\"loot_state_id\":" << unsigned(gameObject->getLootState())
-                    << ",\"spawned\":" << (gameObject->isSpawned() ? "true" : "false");
+                    << ",\"spawned\":" << (gameObject->isSpawned() ? "true" : "false")
+                    << ",\"owner\":";
+                if (!ownerGuid.IsEmpty())
+                {
+                    Unit* owner = ObjectAccessor::GetUnit(*gameObject, ownerGuid);
+                    out << "{\"guid\":\"" << ownerGuid.GetRawValue()
+                        << "\",\"name\":\"" << JsonEscape(owner ? owner->GetNameForLocaleIdx(locale) : "") << "\"}";
+                }
+                else
+                    out << "null";
+            }
             else
                 out << ",\"type\":\"world_object\",\"entry\":" << object->GetEntry();
             out << '}';
