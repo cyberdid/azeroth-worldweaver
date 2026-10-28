@@ -44,7 +44,6 @@ WORKDIR = Path(os.path.abspath(os.path.expanduser(os.environ.get("WOW_AGENT_WORK
 HISTORY = Path(os.path.expanduser(os.environ.get("WOW_AGENT_CLAUDE_HISTORY", str(TELEMETRY_DIR / "claude-history.json"))))
 CURSOR = Path(os.path.expanduser(os.environ.get("WOW_AGENT_CLAUDE_CURSOR", str(TELEMETRY_DIR / "claude-world-cursor.json"))))
 SCREENSHOT_DIR = TELEMETRY_DIR / "screenshots"
-SCREENSHOT_METADATA = SCREENSHOT_DIR / "latest.json"
 WORLD_QUERY_CLIENT = TELEMETRY_DIR / "world-query-client.py"
 BRIDGE_LOG = DIR / "claude-bridge.log"
 ALLOWED_CMDS = {"follow", "stay", "attack", "flee", "summon", "tank", "revive", "maintenance"}
@@ -62,7 +61,7 @@ If `event_history_truncated` is true, older events were omitted from this prompt
 The server-recorded `orientation` field gives the facing angle in radians for group members and nearby objects; line of sight is a separate fact.
 For multi-page nearby results, pass the first page's `snapshot.session_id` and `snapshot.snapshot_seq` as `--session-id` and `--snapshot-seq` on every continuation. The helper keeps a private snapshot cache for up to 30 seconds. If it returns `snapshot_changed`, discard prior pages and restart at offset 0; if any page returns an error, do not merge it with earlier pages. Never merge pages from different sessions or sequences.
 
-The shared screenshot sidecar is included with each request. Read its PNG only when metadata says available and the file is within the shared screenshots directory. It is visual evidence only; correlate its session, group, sequence, and age with the server snapshot. Never claim pixels prove hidden server state.
+Screenshots are captured only when the authorized user's message clearly asks for visual inspection. If `requested` is false, do not read an older frame. When requested, read the PNG only if metadata says it is available, non-stale, and inside the shared screenshots directory. It is visual evidence only; correlate its session, group, sequence, and age with the server snapshot. Never claim pixels prove hidden server state.
 
 For static game data and live nearby-object pages, use only the typed read-only helper at {WORLD_QUERY_CLIENT}: `python3 -I {WORLD_QUERY_CLIENT} <operation> [typed options] --telemetry-dir "{TELEMETRY_DIR}"`. Static operations are creature, gameobject, spawns, quest, fishing, loot, item, and spell; their provenance is `static_template`/`static_spawn` and does not prove an object is loaded. The `nearby` operation returns `live_snapshot` records from the current server snapshot. Filter it with `--group-id`, `--kind`, `--entry`, `--name`, `--map-id`, `--radius`, `--line-of-sight`, `--attackable-only`, or `--fishing-only`; page with `--limit` (1-50) and `--offset`. Follow `next_offset` exactly when present; pin continuation pages with the returned `--session-id` and `--snapshot-seq`. Check age, clock-skew, and server-truncation metadata. Never use raw SQL, inspect credentials, or run other shell commands.
 
@@ -80,6 +79,7 @@ def load_module(name: str, path: Path):
 
 
 WORLD_STATE = load_module("wow_agent_world_state", Path(__file__).with_name("world_state.py"))
+WINDOW_CAPTURE = load_module("wow_agent_window_capture", Path(__file__).with_name("wow_window_capture.py"))
 
 
 def log(message: str) -> None:
@@ -112,13 +112,17 @@ def clean_chat(text: str) -> str:
     return text.split(CONTEXT_MARKER, 1)[0].strip()
 
 
-def visual_context(snapshot_cursor: dict[str, Any]) -> str:
-    try:
-        metadata = json.loads(SCREENSHOT_METADATA.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return json.dumps({"available": False, "reason": "Screenshot metadata is unavailable."})
-    if not isinstance(metadata, dict) or metadata.get("available") is not True:
-        return json.dumps(metadata if isinstance(metadata, dict) else {"available": False}, ensure_ascii=False)
+def visual_context(snapshot_cursor: dict[str, Any], text: str) -> str:
+    group_id = snapshot_cursor.get("group_id")
+    snapshot_path = TELEMETRY_DIR / f"world-state-{group_id}.json" if isinstance(group_id, str) and group_id.isdigit() else None
+    metadata = WINDOW_CAPTURE.capture_for_request(
+        text, str(snapshot_path) if snapshot_path else None, str(SCREENSHOT_DIR), min_interval_seconds=10.0)
+    if not isinstance(metadata, dict):
+        metadata = {"available": False, "requested": WINDOW_CAPTURE.is_visual_request(text)}
+    if metadata.get("available") is not True:
+        result = dict(metadata)
+        result.setdefault("requested", WINDOW_CAPTURE.is_visual_request(text))
+        return json.dumps(result, ensure_ascii=False)
 
     try:
         image = Path(str(metadata.get("path", ""))).resolve()
@@ -133,6 +137,7 @@ def visual_context(snapshot_cursor: dict[str, Any]) -> str:
     except (TypeError, ValueError, OverflowError):
         capture_age = float("inf")
     metadata = dict(metadata)
+    metadata["requested"] = True
     metadata["image_path_validated"] = safe_file
     metadata["prompt_session_id"] = snapshot_cursor.get("session_id")
     metadata["prompt_group_id"] = snapshot_cursor.get("group_id")
@@ -236,7 +241,7 @@ def handle(channel: str, sender: str, raw_text: str, history: list[str], effort:
 
     history.append(f"{sender} ({channel.lower()}): {text}")
     world_context, next_cursor = read_context()
-    visual = visual_context(next_cursor)
+    visual = visual_context(next_cursor, text)
     task = f"Respond as {BOT} to this authorized user's latest in-game message."
     if channel == "PARTY" and not ADDRESSED.search(text):
         task += " The user spoke to the group; Codex may also answer, so add only useful information of your own or output exactly SKIP."

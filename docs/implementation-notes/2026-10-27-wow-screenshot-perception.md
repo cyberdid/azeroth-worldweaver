@@ -4,7 +4,7 @@
 
 **Goal:** Attach a current image of the WoW client to Codex prompts and make the same image available to Claude.
 
-**Architecture:** A Python X11 helper verifies the WoW window title/class and owning process, captures its exact window ID, and writes a bounded PNG with group/session/snapshot metadata. Codex CLI receives the PNG through `-i`; Claude gets the stable metadata path inside the compact observation attached to the same real user message. The current adapter refreshes at a five-second cadence.
+**Architecture:** A Python X11 helper verifies the WoW window title/class and owning process, captures its exact window ID, and writes a bounded PNG with group/session/snapshot metadata only for explicit visual requests. Codex CLI receives the PNG through `-i`; Claude uses the same validated path for that request. A private inter-process lock serializes simultaneous adapter requests. No background capture runs.
 
 **Tech Stack:** Python 3, X11 (`xprop`/`xwd` or Xlib), Pillow, Codex CLI image input, Claude Code local image reading.
 
@@ -62,3 +62,10 @@
 - Verified the installed `ask_codex()` path against a historical user-provided WoW screenshot. Codex and Claude independently described the same image and correctly treated it as historical.
 - Replaced the per-pixel Python loop for standard 24/32-bit XWD layouts with Pillow's raw decoder. On this machine, a live-sized 2560×1600 frame decoded in about 25 ms; PNG encoding remains the larger part of capture time.
 - A post-restart in-game message is still needed to verify that the live adapters receive and answer a fresh user request with matching screenshot metadata. When WoW is not the active window, the capture helper explicitly reports the image unavailable instead of reusing a stale frame.
+
+### Follow-up — on-demand visual capture (2026-10-28)
+
+- Updated both adapters to capture only when an authenticated user's text explicitly requests visual inspection. The shared detector recognizes common Ukrainian and English phrases and rejects clear negative requests such as “не роби скріншот” and “no screenshot”.
+- Removed the Codex bridge's five-second background capture loop. One-second world telemetry remains unchanged. Nonvisual prompts receive `requested=false` and no image path, so old frames are not presented as current.
+- Added a private file lock around X11 capture. Concurrent Claude/Codex handlers serialize through it and reuse a recent verified frame for up to ten seconds.
+- The focused helper tests pass, including explicit/negative visual request detection and concurrent capture serialization. A fresh in-game visual prompt is still required to verify both live model consumers.

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import fcntl
 import os
 import re
 import shutil
@@ -24,6 +25,28 @@ MAX_PNG_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_DIMENSION = 8192
 MAX_IMAGE_PIXELS = 20_000_000
 RETAIN_IMAGES = 6
+_VISUAL_REQUEST_RE = re.compile(
+    r"(?:\b(?:screenshot|screen|image|picture|visual|look\s+(?:at\s+)?(?:the\s+)?(?:screen|game|window)|"
+    r"what\s+do\s+you\s+see|what(?:'s|\s+is)\s+on\s+screen)\b"
+    r"|\b(?:скрін(?:шот)?|скрин(?:шот)?|фото|зображенн\w*|картинк\w*|екран\w*|"
+    r"бачиш|видно|глянь|поглянь|подив(?:ись|ися)|що\s+(?:ти\s+)?бачиш|що\s+на\s+екрані|"
+    r"опиши\s+(?:зображення|картинку|скрін(?:шот)?))\b)",
+    re.IGNORECASE,
+)
+_NEGATED_VISUAL_REQUEST_RE = re.compile(
+    r"\b(?:no|without|avoid|stop|don't|do\s+not)\s+(?:(?:take|capture|make|create)\s+)?"
+    r"(?:a\s+)?(?:screenshot|screen\s*capture|screen(?:shot)?|image|picture)\b"
+    r"|\b(?:не(?:\s+(?:роби|робіть|знімай|знімайте|створюй|створюйте))?|без|ніяких|ніякого|"
+    r"не\s+(?:треба|потрібно)\s+(?:робити|знімати))\s+"
+    r"(?:будь-яких\s+)?(?:скріншот\w*|скрін\w*|скриншот\w*|скрин\w*|кадр\w*|знімок\w*|фото\w*|зображенн\w*|екран\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def is_visual_request(text: str) -> bool:
+    """Return whether the user explicitly asks for visual inspection of the game."""
+    return (isinstance(text, str) and not _NEGATED_VISUAL_REQUEST_RE.search(text)
+            and bool(_VISUAL_REQUEST_RE.search(text)))
 
 
 def _run(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
@@ -337,7 +360,8 @@ def _capture_game_window(
             cached["checked_at"] = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime())
             cached["stale"] = (previous.get("capture_session_id") != current_session
                                or previous.get("capture_group_id") != current_group_id
-                               or current_snapshot_seq is None or current_snapshot_age is None or age > 5.0
+                               or current_snapshot_seq is None or current_snapshot_age is None
+                               or age > max(5.0, min_interval_seconds)
                                or current_snapshot_age > 5.0)
             cached["reason"] = "reused recent capture after verifying the current WoW window"
             try:
@@ -423,10 +447,38 @@ def capture_game_window(
     min_interval_seconds: float = 5.0,
 ) -> dict[str, Any]:
     """Keep the shared sidecar honest even when an unexpected capture error occurs."""
+    descriptor: int | None = None
     try:
+        directory = Path(output_dir)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(directory, 0o700)
+        descriptor = os.open(directory / ".capture.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
         return _capture_game_window(snapshot_path, output_dir, min_interval_seconds)
     except Exception as exc:
         return publish_unavailable(output_dir, f"unexpected WoW capture failure: {type(exc).__name__}")
+    finally:
+        if descriptor is not None:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
+
+def capture_for_request(
+    text: str,
+    snapshot_path: str | None,
+    output_dir: str,
+    min_interval_seconds: float = 10.0,
+) -> dict[str, Any]:
+    """Capture only when the user explicitly asks the agents to inspect the game image."""
+    if not is_visual_request(text):
+        return {"available": False, "requested": False, "path": None,
+                "reason": "No explicit visual request; background capture is disabled."}
+    result = dict(capture_game_window(snapshot_path, output_dir, min_interval_seconds))
+    result["requested"] = True
+    return result
 
 
 if __name__ == "__main__":

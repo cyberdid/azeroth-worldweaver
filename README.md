@@ -31,7 +31,7 @@ This is a **public experimental snapshot**, not a ready-to-install release. The 
 | Shared request relay for an agent without database-file access | Available through fixed typed operations; both adapters can use the credential-free client |
 | Authenticated chat authority | Both adapters use a configurable exact sender allowlist; empty by default, so no character can start a task until configured |
 | World-state snapshot and event writer | On 2026-10-28, live group snapshot sequence 713 contained all 3 group members and 109 nearby objects under the 500-object cap, with no truncation, 109 facing angles, and zero dropped events/records/snapshots. Worldserver `server info` reported 4/6/7 ms p95/99/max with one connected player. Clean public install, dense-area cost, and fresh model responses remain unverified |
-| Screenshot capture | Live sidecar reports an available, process-verified, non-stale WoW window capture matched to snapshot sequence 705 (0.56 s old when checked). The adapters receive the shared visual metadata/path, but fresh model consumption by both agents remains unverified |
+| Screenshot capture | Both adapters now capture only for explicit visual requests; a private inter-process lock makes them share one recent verified-window frame. Background capture is disabled, ordinary prompts do not attach an older frame, and fresh model consumption by both agents remains unverified |
 | Ordinary-language requests converted into fully validated game actions | Design and initial playerbot action mappings are documented; the typed server dispatcher is not implemented |
 | End-to-end in-game validation | Shared telemetry and Codex visual capture were observed live; the Claude chat adapter is running but has not handled a fresh game message yet |
 
