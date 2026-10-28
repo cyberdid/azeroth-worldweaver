@@ -94,7 +94,7 @@ operation to filter/page the live snapshot with `--kind`, `--entry`, `--name`, `
 `--line-of-sight`, `--attackable-only`, or `--fishing-only`; pass `--group-id` and page using `--limit` (1-50)
 and `--offset`. Follow `next_offset` exactly when present because pages can be shortened to fit the response-size limit.
 Verify its session, sequence, age, `clock_skew`, and `stale` flag.
-Never claim absence if `nearby_server_truncated` is true. In compact snapshots, fields in `snapshot.nearby_defaults` apply to each nearby
+Never claim absence if `nearby_server_truncated` is true. `orientation` records server facing in radians for group members and nearby objects; treat line of sight as a separate fact. In compact snapshots, fields in `snapshot.nearby_defaults` apply to each nearby
 record unless that record provides its own value. Missing from the list does not prove an object is absent
 or unreachable. `npc_roles` and raw NPC flags are service clues, not proof a specific quest is offered or an interaction
 will succeed. `fishing_node` and `fishing_hole` identify a live object type, not castability, loot, or required skill;

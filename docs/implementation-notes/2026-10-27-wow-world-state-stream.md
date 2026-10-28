@@ -120,3 +120,10 @@
 - Timestamped local backups were made before deployment. No database, spell files, or user spell changes were modified.
 - Post-restart bridge processes are running, but no fresh group snapshot has been written yet; the latest file is from before the restart. The client process remains open, and the characters must reconnect before validating the 500-object cap, shared context, and tick cost. The code review found no critical or important issues; its remaining performance recommendation is to inspect `tick_p95_ms` in a dense area after fresh telemetry resumes.
 - A clean public install and fresh model response remain unverified.
+
+### Follow-up: bound dense-area collection cost and expose facing
+
+- Replaced per-candidate linear duplicate scans and furthest-item scans with a bounded ordered set plus key index. The collector still retains the nearest configured objects and preserves the server-truncation flag while reducing candidate work from repeated scans over the 500 retained records to logarithmic lookups.
+- Added `orientation` to each nearby live record; member orientation was already present. Both prompts explain that this is the server-facing angle in radians and remains separate from line of sight.
+- The optimization and orientation field compiled, were installed, and were deployed with a second server restart. `server info` confirms the new worldserver is ready; with zero players online, idle update p95/99/max are 3/4/5 ms, which does not measure observer cost.
+- The previous telemetry snapshot remains stale because no characters have reconnected. Validate the 500-object cap, orientation values, both agent readers, and dense-area tick cost after the group returns.

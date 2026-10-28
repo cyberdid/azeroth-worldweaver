@@ -27,7 +27,7 @@ This is a **public experimental snapshot**, not a ready-to-install release. The 
 | Capability | State in this snapshot |
 |---|---|
 | Fixed-operation, read-only world database lookups | Implemented; fishing and loot references can expand into bounded item rows |
-| Live nearby-object queries | Typed `nearby` helper filters and pages the latest group snapshot by kind, entry, name, radius, visibility, attackability, or fishing markers; page size is capped at 50 and freshness/truncation are explicit |
+| Live nearby-object queries | Typed `nearby` helper filters and pages the latest group snapshot by kind, entry, name, radius, visibility, attackability, or fishing markers; page size is capped at 50, and live records include position, facing, provenance, freshness, and truncation metadata |
 | Shared request relay for an agent without database-file access | Available through fixed typed operations; both adapters can use the credential-free client |
 | Authenticated chat authority | Both adapters use a configurable exact sender allowlist; empty by default, so no character can start a task until configured |
 | World-state snapshot and event writer | Private server rebuilt and restarted with a 500-object cap and 256K context budget. The latest verified pre-deploy snapshot had 100 records and `nearby_truncated=true`; post-restart group telemetry is pending player reconnection, so the new cap and load impact are not yet live-verified. Clean public install is unverified |

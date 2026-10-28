@@ -37,10 +37,13 @@
 #include <filesystem>
 #include <functional>
 #include <iomanip>
+#include <iterator>
 #include <map>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -589,13 +592,32 @@ namespace
         Player* nearest = nullptr;
     };
 
+    using NearbyObjectKey = std::tuple<uint32, uint32, uint64>;
+
+    NearbyObjectKey GetNearbyObjectKey(NearbyObject const& nearby)
+    {
+        return {nearby.object->GetMapId(), nearby.object->GetInstanceId(),
+            nearby.object->GetGUID().GetRawValue()};
+    }
+
+    struct NearbyObjectOrder
+    {
+        bool operator()(NearbyObject const& left, NearbyObject const& right) const
+        {
+            if (left.distance != right.distance)
+                return left.distance < right.distance;
+            return GetNearbyObjectKey(left) < GetNearbyObjectKey(right);
+        }
+    };
+
     struct NearbyObjectCollector
     {
         Player* member;
         Map* map;
         float radius;
         uint32 limit;
-        std::vector<NearbyObject>& nearby;
+        std::set<NearbyObject, NearbyObjectOrder>& nearby;
+        std::map<NearbyObjectKey, std::set<NearbyObject, NearbyObjectOrder>::iterator>& nearbyByKey;
         bool& truncated;
 
         void operator()(WorldObject* object) const
@@ -610,32 +632,30 @@ namespace
             uint64 const guid = object->GetGUID().GetRawValue();
             uint32 const mapId = member->GetMapId();
             uint32 const instanceId = member->GetInstanceId();
-            auto found = std::find_if(nearby.begin(), nearby.end(), [guid, mapId, instanceId](NearbyObject const& candidate)
+            NearbyObjectKey const key{mapId, instanceId, guid};
+            NearbyObject const candidate{distance, object, member};
+            auto found = nearbyByKey.find(key);
+            if (found != nearbyByKey.end())
             {
-                return candidate.object && candidate.object->GetMapId() == mapId
-                    && candidate.object->GetInstanceId() == instanceId
-                    && candidate.object->GetGUID().GetRawValue() == guid;
-            });
-            if (found != nearby.end())
-            {
-                if (distance < found->distance)
+                if (distance < found->second->distance)
                 {
-                    found->distance = distance;
-                    found->nearest = member;
+                    nearby.erase(found->second);
+                    found->second = nearby.insert(candidate).first;
                 }
                 return;
             }
             if (nearby.size() < limit)
-                nearby.push_back({distance, object, member});
+                nearbyByKey.emplace(key, nearby.insert(candidate).first);
             else
             {
                 truncated = true;
-                auto furthest = std::max_element(nearby.begin(), nearby.end(), [](NearbyObject const& left, NearbyObject const& right)
+                auto furthest = std::prev(nearby.end());
+                if (distance < furthest->distance)
                 {
-                    return left.distance < right.distance;
-                });
-                if (furthest != nearby.end() && distance < furthest->distance)
-                    *furthest = {distance, object, member};
+                    nearbyByKey.erase(GetNearbyObjectKey(*furthest));
+                    nearby.erase(furthest);
+                    nearbyByKey.emplace(key, nearby.insert(candidate).first);
+                }
             }
         }
     };
@@ -673,8 +693,8 @@ namespace
             << ",\"group\":[";
 
         bool firstMember = true;
-        std::vector<NearbyObject> nearby;
-        nearby.reserve(maxNearbyObjects);
+        std::set<NearbyObject, NearbyObjectOrder> nearby;
+        std::map<NearbyObjectKey, std::set<NearbyObject, NearbyObjectOrder>::iterator> nearbyByKey;
         bool nearbyTruncated = false;
         for (Player* member : context.members)
         {
@@ -876,7 +896,8 @@ namespace
             if (map)
             {
                 float const radius = std::min(member->GetVisibilityRange(), configuredRadius);
-                NearbyObjectCollector collector{member, map, radius, maxNearbyObjects, nearby, nearbyTruncated};
+                NearbyObjectCollector collector{member, map, radius, maxNearbyObjects, nearby, nearbyByKey,
+                    nearbyTruncated};
                 uint32 const mapTypeMask = GRID_MAP_TYPE_MASK_CREATURE | GRID_MAP_TYPE_MASK_GAMEOBJECT;
                 Acore::WorldObjectWorker<NearbyObjectCollector> searcher(member, collector, mapTypeMask);
                 Cell::VisitObjects(member, searcher, radius);
@@ -885,10 +906,7 @@ namespace
             out << '}';
         }
 
-        std::sort(nearby.begin(), nearby.end(), [](NearbyObject const& left, NearbyObject const& right)
-        {
-            return left.distance < right.distance;
-        });
+        std::vector<NearbyObject> nearbyRecords(nearby.begin(), nearby.end());
 
         out << "],\"nearby\":[";
         std::ostringstream compact;
@@ -941,11 +959,11 @@ namespace
             }
         compact << "Live npc_roles are server service flags, not proof a specific quest is available. "
             << "fishing_node/fishing_hole identify live object types.\n";
-        compact << "Nearest loaded same-phase objects (max " << nearby.size() << "):";
-        for (std::size_t i = 0; i < nearby.size(); ++i)
+        compact << "Nearest loaded same-phase objects (max " << nearbyRecords.size() << "):";
+        for (std::size_t i = 0; i < nearbyRecords.size(); ++i)
         {
-            WorldObject* object = nearby[i].object;
-            Player* nearest = nearby[i].nearest;
+            WorldObject* object = nearbyRecords[i].object;
+            Player* nearest = nearbyRecords[i].nearest;
             if (!object || !nearest)
                 continue;
 
@@ -960,8 +978,9 @@ namespace
             out << "{\"source\":\"live\",\"loaded\":true,\"phase_mask\":" << object->GetPhaseMask()
                 << ",\"line_of_sight\":" << (lineOfSight ? "true" : "false")
                 << ",\"position\":[" << object->GetPositionX() << ',' << object->GetPositionY() << ',' << object->GetPositionZ()
-                << "],\"map_id\":" << object->GetMapId() << ",\"instance_id\":" << object->GetInstanceId()
-                << ",\"distance\":" << nearby[i].distance
+                << "],\"orientation\":" << object->GetOrientation()
+                << ",\"map_id\":" << object->GetMapId() << ",\"instance_id\":" << object->GetInstanceId()
+                << ",\"distance\":" << nearbyRecords[i].distance
                 << ",\"nearest_member\":\"" << JsonEscape(nearest->GetName()) << "\"";
 
             if (creature)
@@ -998,7 +1017,7 @@ namespace
                 out << ",\"type\":\"world_object\",\"entry\":" << object->GetEntry();
             out << '}';
 
-            compact << "\n- " << std::fixed << std::setprecision(1) << nearby[i].distance << " yd "
+            compact << "\n- " << std::fixed << std::setprecision(1) << nearbyRecords[i].distance << " yd "
                 << (object->ToCreature() ? "creature" : object->ToGameObject() ? "gameobject" : "object")
                 << " entry=" << object->GetEntry() << " map=" << object->GetMapId()
                 << " instance=" << object->GetInstanceId() << " phase=" << object->GetPhaseMask()
