@@ -9,7 +9,7 @@ Give Claude and Codex the same fresh, bounded, live view of their current group 
 
 ## Current gap
 
-The installed server binary is stale: its chat hook serializes snapshots synchronously only when chat arrives and writes them to each bot log as `BOTSAY`. The new `WorldScript` observer/writer compiled in the local build tree but has not been installed or activated. The current deployment has no fresh snapshot or event stream while the server is stopped. Claude's active monitor drops every standalone `BOTSAY` line; the Codex reader supports the shared snapshot/event format, but neither agent can consume live observer data until deployment and in-game validation.
+The `WorldScript` observer/writer is compiled, installed, and running on the author's private server. Before the latest rebuild it wrote one-second snapshots and an event journal. The latest server restart is complete, but no group is online yet, so the richer inventory and creature fields still need a fresh post-restart snapshot for live validation. Both agent adapters read the shared format; a new in-game message is needed to confirm their post-restart behavior.
 
 ## Design
 

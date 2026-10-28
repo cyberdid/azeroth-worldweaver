@@ -29,12 +29,12 @@ This is a **public experimental snapshot**, not a ready-to-install release. The 
 | Fixed-operation, read-only world database lookups | Implemented; fishing and loot references can expand into bounded item rows |
 | Shared request relay for an agent without database-file access | Available through fixed typed operations; both adapters can use the credential-free client |
 | Authenticated chat authority | Both adapters use a configurable exact sender allowlist; empty by default, so no character can start a task until configured |
-| World-state snapshot and event writer | Compiled and installed on the author's private Playerbot server; one-second snapshots and live events are being written. Backpack/equipped-bag enumeration and creature trigger/attack-validity fields have source fixes pending operator-approved rebuild and restart; a clean public install is unverified |
+| World-state snapshot and event writer | Rebuilt, installed, and restarted on the author's private Playerbot server. The new binary contains backpack/equipped-bag enumeration and creature trigger/attack-validity fields; a fresh post-restart group snapshot is waiting for a player to reconnect, so those fields are not yet live-verified. A clean public install is unverified |
 | Screenshot capture | Verified locally against a live WoW X11 client; accepts only the active, verified game window and decodes TrueColor/DirectColor channels; Codex attaches frames, and the Claude adapter can read the same validated image path; Claude visual delivery still needs a live check |
 | Ordinary-language requests converted into fully validated game actions | Design and initial playerbot action mappings are documented; the typed server dispatcher is not implemented |
 | End-to-end in-game validation | Shared telemetry and Codex visual capture were observed live; the Claude chat adapter is running but has not handled a fresh game message yet |
 
-This AzerothCore tree discovers module directories from their source layout and recursively collects source files during CMake configuration; it does not require a module-specific `CMakeLists.txt`. Reconfigure an existing build tree after adding the observer and writer `.cpp` files so CMake collects them. On the author's private host, the observer was compiled from the local Playerbot worktree, installed, and observed writing fresh snapshots and events. That confirms one private deployment only; it is not a clean public install procedure. The `Object.h` compatibility change required by the observer is provided as a small patch under `patches/azerothcore/`.
+This AzerothCore tree discovers module directories from their source layout and recursively collects source files during CMake configuration; it does not require a module-specific `CMakeLists.txt`. Reconfigure an existing build tree after adding the observer and writer `.cpp` files so CMake collects them. On the author's private host, the observer was compiled from the local Playerbot worktree, installed, and restarted. The earlier deployment wrote fresh snapshots and events; the latest restart awaits an online group before its richer fields can be confirmed. This confirms one private deployment only; it is not a clean public install procedure. The `Object.h` compatibility change required by the observer is provided as a small patch under `patches/azerothcore/`.
 
 ## Design principles
 
@@ -121,9 +121,9 @@ When Claude cannot read the server configuration, the Codex bridge can expose a 
 
 ## Roadmap
 
-1. Reconfigure CMake so the generated build includes the new observer/writer sources, then compile against a supported AzerothCore checkout.
-2. Activate and validate the shared observer, event journal, and freshness reporting on a test server.
-3. Confirm the same snapshot and static-query results are consumable by both agent adapters; Codex's path is live, while Claude still needs a fresh-message check.
+1. Reconfigure CMake and compile against a supported AzerothCore checkout; this has succeeded on the author's private Playerbot worktree, while a clean public checkout remains unverified.
+2. After a player group reconnects to the restarted private server, confirm the post-restart snapshot, detailed item/creature fields, event journal, and freshness reporting.
+3. Confirm the same post-restart snapshot and static-query results are consumable by both agent adapters; a fresh message after the latest restart is still needed.
 4. Verify both agent image paths against an open client and matching live snapshot.
 5. Implement a typed, server-validated action dispatcher with correlated acknowledgements and observed outcomes.
 6. Run a documented in-game validation pass before calling a release stable.
