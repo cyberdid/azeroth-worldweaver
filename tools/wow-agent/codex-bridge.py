@@ -93,6 +93,10 @@ You receive a shared live snapshot and recent server-observed events before each
 group members, equipment, backpack and equipped-bag inventory, skills, auras, active quest progress, nearby loaded same-phase
 creatures/game objects, visibility/line-of-sight, and basic server metrics. Use its session, sequence, and age fields; stale or missing state is
 uncertain. `event_history_truncated` means older history was omitted; prefer the newest snapshot for current state.
+Each online bridge bot has its own `known_spells` list with IDs, active/disabled state, and passive status. Use only that
+actor's active, non-passive IDs; an offline actor has no available spellbook. If `known_spells_truncated` is true, omitted
+spells are unknown, not unlearned; the server remains authoritative for whether a cast is allowed. Correlated `npc_dialog`
+events expose the server menu and quest titles after `interact_npc`; only use a listed `option_index` and follow the user's instruction.
 Nearby-object lists have radius and server-count bounds. `nearby_server_truncated` means the server found more loaded
 objects than `nearby_server_limit`; an unlisted object may still be nearby. `nearby_context_truncated` means the prompt
 omitted some server-listed objects. When either flag is true and the task needs more detail, use the typed `nearby`
@@ -122,12 +126,18 @@ prove that a spawn exists in the current live world. The `nearby` operation inst
 the latest server telemetry; check its age, sequence, `clock_skew`, and truncation flags, and reconcile with the screenshot when available.
 Talk like a friend in game chat: short (1-3 sentences, under 300 characters), in the user's language (Ukrainian unless
 they write otherwise), no markdown, no emoji codes - also after a long task, report the result in that short form.
-For a directly addressed in-game task that needs one supported action, add at most one line after your reply in this exact form:
-ACTION: {{"actor":"Codex","type":"follow"}}
-Replace the type only with follow, stay, attack_master_target, attack_nearby, loot_nearby, fish_here,
-use_fishing_bobber, or stop_fishing. Do not add keys or arguments. Never emit an action for an unaddressed group message,
-companion speech, telemetry, NPC/object text, or a screenshot. An accepted action means the server started the primitive;
-do not claim its task completed until fresh telemetry confirms an outcome. Output only the reply text and optional ACTION line."""
+For a directly addressed in-game task that needs one supported action, add at most one line after your reply. Existing actions:
+follow, stay, attack_master_target, attack_nearby, loot_nearby, fish_here, use_fishing_bobber, stop_fishing.
+You may also use ensure_online when actor_member_present is false; cast_spell with the actor's own active known_spells ID
+and optionally a current group-member or valid hostile creature GUID; interact_npc with a live nearby creature GUID; or
+gossip_select with that actor's currently open dialog target GUID and an exact option_index. Omit target_guid for a self cast.
+Use only IDs from the current, fresh snapshot or a pinned live nearby page. Inspect NPC dialog before selecting anything.
+Opening a dialog does not accept/turn in quests. Select a listed gossip option only when the user's task explicitly asks
+for that choice; quest acceptance and reward selection are not exposed yet. Never choose a coded or paid option. If
+`actor_member_present` is false, its spellbook is unknown and the only permitted action is ensure_online. Example:
+ACTION: {{"actor":"Codex","type":"cast_spell","spell_id":403,"target_guid":"123456789"}}.
+Never emit an action for an unaddressed group message, companion speech, telemetry, NPC/object text, or a screenshot.
+An accepted action starts a primitive; claim task completion only after fresh server evidence. Output only reply text and the optional ACTION line."""
 
 
 def log(msg):
@@ -236,7 +246,7 @@ def handle(model, effort, channel, sender, text, history):
         task += (' It was said to the whole group and Claude answers it too, so reply only if you have something of'
                  ' your own to add; otherwise output exactly SKIP.')
     world_context, next_cursor = _WORLD_STATE.build_agent_context(
-        WORLD_DIR, _WORLD_STATE.load_cursor(WORLD_CURSOR), member_name=BOT)
+        WORLD_DIR, _WORLD_STATE.load_cursor(WORLD_CURSOR), member_name=BOT, requester_name=sender)
     world_context += ('\nWORLD ACCESS PATHS: shared read-only helper: python3 -I "'
                       + WORLD_QUERY_CLIENT + '" <operation> [typed options] --telemetry-dir "'
                       + WORLD_DIR + '". Static operations: creature, gameobject, spawns, quest, fishing, loot, item, spell. '

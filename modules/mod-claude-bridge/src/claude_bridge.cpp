@@ -302,7 +302,8 @@ public:
     // Typed bridge action: all values are bounded scalar tokens and the dispatcher maps
     // the final enum to a fixed PlayerbotAI action. This command is SOAP/console-only.
     static bool HandleAction(ChatHandler* handler, std::string actorName, std::string requesterName,
-        std::string groupId, std::string actionId, std::string actionType)
+        std::string groupId, std::string actionId, std::string actionType,
+        std::string spellId, std::string targetGuid, std::string optionIndex)
     {
         if (!handler->IsConsole())
         {
@@ -310,7 +311,8 @@ public:
             return false;
         }
 
-        ActionResult const result = DispatchTypedAction(actorName, requesterName, groupId, actionId, actionType);
+        ActionResult const result = DispatchTypedAction(actorName, requesterName, groupId, actionId, actionType,
+            spellId, targetGuid, optionIndex);
         handler->PSendSysMessage("ACTION_RESULT: {}", result.ToJson());
         return true;
     }

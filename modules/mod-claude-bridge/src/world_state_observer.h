@@ -14,4 +14,6 @@ void PublishActionResultEvent(Player* requester, std::string const& actorName,
     std::string const& actionId, std::string const& actionType,
     std::string const& status, std::string const& reasonCode);
 
+void PublishNpcDialogEvent(Player* actor, std::string const& actionId);
+
 #endif

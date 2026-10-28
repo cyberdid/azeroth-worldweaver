@@ -13,17 +13,20 @@
 ## Global Constraints
 
 - Accept tasks only from authenticated `<user-character-1>` or `<user-character-2>` player sessions.
-- Actor must be `Claude` or `Codex` and an online member of the user's current group.
+- Actor must be the configured `Claude` or `Codex` bridge bot; only `ensure_online` can target a missing bot.
 - No free-form shell, SQL, or arbitrary `.claude cmd` text in the typed action interface.
-- Validate target map/phase/visibility on the server before acting. Unsupported spell/item/quest primitives remain outside the first allowlist.
+- Validate spell ownership, target map/phase/visibility, NPC GUID, and menu option on the server. Quest acceptance/reward, item use, and arbitrary commands remain outside this action set.
 - Keep all accepted/rejected action records correlated by `action_id` and avoid credential/prompt logging.
 
 ## Current status (2026-10-28)
 
-- The fixed action protocol, Python validation/dispatch client, both chat adapters, server-side allowlist, SOAP command, and correlated accepted/rejected world events are implemented.
-- The live Playerbot worktree compiled the new static module successfully. A live `follow` probe exposed that the low-level `follow` tick is useless when a bot is already in formation range; the code now maps both `follow` and `stay` to the real persistent chat shortcuts. The corrected binary is built but is not running yet because the user is in game.
-- A typed in-game action and resulting telemetry acknowledgement remain unverified; the earlier probe was correctly rejected by the old running binary as `action_unavailable`.
-- The first allowlist covers follow/stay, attack, loot, and fishing primitives. Spell/item, named travel, quest selection, and arbitrary command execution are outside this version.
+- The fixed action protocol now includes spell casting, bounded NPC approach, gossip inspection/selection, and allowlisted bot login, alongside follow/stay, attack, loot, and fishing.
+- Snapshots publish each online member's sorted spellbook (capped at 256); action-correlated `npc_dialog` events expose current gossip options and visible quest titles/statuses. Offline actor context carries the user's group snapshot and `actor_member_present=false`, without borrowing another character's spellbook.
+- `make -j20 worldserver` succeeded. The built executable was installed atomically with a backup; the private worldserver restarted and reported ready. Both bridges restarted with the updated Python adapters at `xhigh` effort.
+- After reconnect, Codex and Claude context readers returned the same live session and snapshot sequence with both bots and Terisfal in the group. Codex's latest spellbook had 356 entries; the observer emits at most 256 and marks the list truncated.
+- A live typed Lightning Shield self-cast was accepted (`cast_started`) and a later native `spell_cast` event reported Lightning Shield#25469. The native event does not carry `action_id`, so the observed correlation is actor plus spell ID. A live interaction with Gremlock Pilsnor opened menu 5853 and emitted an `npc_dialog` event carrying the accepted action ID; the visible trainer option was not selected and no quest was accepted or rewarded.
+- Client-side Cooking UI recovered after the user restarted the game client; no server-side Cooking change was needed.
+- Quest acceptance/turn-in/rewards, item use, named travel, and arbitrary command execution remain unsupported.
 
 ---
 
@@ -47,14 +50,14 @@
 - Modify: `modules/mod-claude-bridge/conf/claude_bridge.conf.dist`
 
 **Interface:**
-- `DispatchTypedAction(actorName, requesterName, groupId, actionId, actionType) -> ActionResult` returns a correlated `accepted` or `rejected` result.
+- `DispatchTypedAction(actorName, requesterName, groupId, actionId, actionType, spellId, targetGuid, optionIndex) -> ActionResult` returns a correlated result after strict scalar validation.
 
 - [x] Parse one bounded JSON action line in the adapter; reject invalid JSON, duplicate keys, unknown actors/types, and extra fields.
 - [x] Confirm requester is an authenticated configured user character and actor is a bridge bot in the same group with that requester as master.
 - [x] Validate the selected attack target's live creature state, map, instance, phase, line of sight, and native attackability before dispatch.
 - [x] Map the action enum to exact existing playerbot APIs/strategy actions; model text never becomes a server command.
 - [x] Publish accepted/rejected results to the bounded shared event stream and return a correlated structured SOAP result.
-- [ ] Add completion/failure correlation from later game events and fresh snapshots; the current result means only that a primitive started.
+- [x] Publish action-correlated NPC dialog results. Spell casts are checked against the existing server spell-cast event and must be confirmed by fresh telemetry.
 
 ### Task 3: Wire both agent adapters to the typed contract
 
@@ -69,9 +72,10 @@
 - [x] Keep ordinary conversational replies unchanged when the model returns no action.
 - [x] Do not emit an action or reply when the incoming record is `WORLD` telemetry.
 
-### Task 4: Validate end-to-end actions in-game
+### Task 4: Build, deploy, and validate end-to-end actions in-game
 
-- [ ] After deployment, issue one safe movement action and confirm it reaches the intended bot only.
-- [ ] Validate one combat-target action, one quest/loot interaction, and one fishing action against resulting `event_seq` records and fresh state.
-- [ ] Send invalid actor, target, type, and malformed-argument requests; verify each is rejected with no game-side effect.
-- [ ] Confirm Claude and Codex report action completion only after matching server-observed evidence.
+- [x] Rebuild and atomically install the worldserver executable with a pre-update backup; restart the authorized local server.
+- [x] Install adapter/helper updates with backups and restart both bridges.
+- [ ] After player reconnect, issue a harmless learned self-buff and one gossip-only NPC interaction; confirm correlated events and no quest acceptance/reward.
+- [ ] Confirm both bridges consume the same current session/snapshot and report completion only after matching server evidence.
+- [ ] Reject stale/out-of-group targets, unknown spells, and invalid menu indexes without a game-side effect.

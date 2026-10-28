@@ -8,6 +8,7 @@
 #include "DatabaseEnv.h"
 #include "GameObject.h"
 #include "GameTime.h"
+#include "GossipDef.h"
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
 #include "Group.h"
@@ -29,6 +30,7 @@
 #include "World.h"
 #include "WorldScript.h"
 #include "WorldSessionMgr.h"
+#include "action_dispatcher.h"
 #include "world_state_observer.h"
 #include "world_state_writer.h"
 
@@ -745,6 +747,7 @@ namespace
         out << "{\"schema_version\":" << TELEMETRY_SCHEMA_VERSION
             << ",\"observer_features\":{\"playerbot_strategy\":true,\"quest_objectives\":true"
             << ",\"quest_dialog_by_member\":true,\"stable_entity_guids\":true,\"active_class_power\":true"
+            << ",\"known_spells\":true,\"npc_dialog\":true"
             << "}"
             << ",\"session_id\":\"" << JsonEscape(sessionId)
             << "\",\"group_id\":\"" << context.key
@@ -864,7 +867,33 @@ namespace
                     out << "{\"spell_id\":" << spellInfo->Id
                         << ",\"name\":\"" << JsonEscape(spellName ? spellName : "") << "\"}";
                 }
-            out << "]"
+            out << "],\"known_spells_total\":";
+            std::vector<uint32> knownSpellIds;
+            knownSpellIds.reserve(member->GetSpellMap().size());
+            for (auto const& [spellId, playerSpell] : member->GetSpellMap())
+                if (playerSpell && playerSpell->State != PLAYERSPELL_REMOVED && sSpellMgr->GetSpellInfo(spellId))
+                    knownSpellIds.push_back(spellId);
+            std::sort(knownSpellIds.begin(), knownSpellIds.end());
+            constexpr std::size_t MAX_KNOWN_SPELLS = 256;
+            out << knownSpellIds.size()
+                << ",\"known_spells_truncated\":" << (knownSpellIds.size() > MAX_KNOWN_SPELLS ? "true" : "false")
+                << ",\"known_spells\":[";
+            for (std::size_t i = 0; i < std::min(knownSpellIds.size(), MAX_KNOWN_SPELLS); ++i)
+            {
+                if (i)
+                    out << ',';
+                uint32 const spellId = knownSpellIds[i];
+                PlayerSpell const* playerSpell = member->GetSpellMap().at(spellId);
+                SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
+                char const* spellName = spellInfo->SpellName[locale];
+                if (!spellName || !*spellName)
+                    spellName = spellInfo->SpellName[LOCALE_enUS];
+                out << "{\"spell_id\":" << spellId
+                    << ",\"name\":\"" << JsonEscape(spellName ? spellName : "")
+                    << "\",\"passive\":" << (spellInfo->IsPassive() ? "true" : "false")
+                    << ",\"active\":" << (playerSpell->Active ? "true" : "false") << '}';
+            }
+            out << ']'
                 << ",\"skills\":{\"fishing\":" << member->GetSkillValue(SKILL_FISHING)
                 << ",\"cooking\":" << member->GetSkillValue(SKILL_COOKING)
                 << ",\"first_aid\":" << member->GetSkillValue(SKILL_FIRST_AID)
@@ -1505,6 +1534,8 @@ namespace
                 return;
             _elapsed %= interval;
 
+            UpdatePendingTypedActions();
+
             uint32 maxObjects = sConfigMgr->GetOption<uint32>("ClaudeBridge.TelemetryMaxObjects", DEFAULT_MAX_NEARBY_OBJECTS);
             maxObjects = std::max<uint32>(1, std::min<uint32>(maxObjects, 500));
             float radius = sConfigMgr->GetOption<float>("ClaudeBridge.TelemetryRadius", DEFAULT_TELEMETRY_RADIUS);
@@ -1788,6 +1819,60 @@ void PublishActionResultEvent(Player* requester, std::string const& actorName,
         + " status=" + status + " reason=" + reasonCode;
     PublishEvent(groupKey, eventType, actorName, requester->GetMapId(), requester->GetInstanceId(),
         requester->GetZoneId(), payload, detail);
+}
+
+void PublishNpcDialogEvent(Player* actor, std::string const& actionId)
+{
+    if (!actor || !actor->IsInWorld() || !actor->GetGroup() || !actor->PlayerTalkClass
+        || actionId.size() != 32)
+        return;
+
+    GossipMenu const& gossip = actor->PlayerTalkClass->GetGossipMenu();
+    QuestMenu const& quests = actor->PlayerTalkClass->GetQuestMenu();
+    ObjectGuid const sourceGuid = gossip.GetSenderGUID();
+    Creature* source = sourceGuid ? ObjectAccessor::GetCreature(*actor, sourceGuid) : nullptr;
+    if (!source || source->GetMap() != actor->GetMap() || !actor->InSamePhase(source))
+        return;
+
+    LocaleConstant locale = sWorld->GetDefaultDbcLocale();
+    std::ostringstream payload;
+    payload << "{\"action_id\":\"" << JsonEscape(actionId)
+        << "\",\"target_guid\":\"" << sourceGuid.GetRawValue()
+        << "\",\"npc\":\"" << JsonEscape(source->GetNameForLocaleIdx(locale))
+        << "\",\"menu_id\":" << gossip.GetMenuId() << ",\"options\":[";
+    bool first = true;
+    for (auto const& [index, item] : gossip.GetMenuItems())
+    {
+        if (!first)
+            payload << ',';
+        first = false;
+        payload << "{\"option_index\":" << index
+            << ",\"text\":\"" << JsonEscape(item.Message.substr(0, 256))
+            << "\",\"coded\":" << (item.IsCoded ? "true" : "false")
+            << ",\"money\":" << item.BoxMoney
+            << ",\"option_type\":" << item.OptionType << '}';
+    }
+    payload << "],\"quests\":[";
+    for (uint8 i = 0; i < quests.GetMenuItemCount(); ++i)
+    {
+        if (i)
+            payload << ',';
+        uint32 const questId = quests.GetItem(i).QuestId;
+        Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+        payload << "{\"quest_id\":" << questId
+            << ",\"title\":\"" << JsonEscape(quest ? quest->GetTitle() : "Unknown quest")
+            << "\",\"status\":" << unsigned(actor->GetQuestStatus(questId)) << '}';
+    }
+    payload << "]}";
+
+    Group* group = actor->GetGroup();
+    std::string const groupKey = MakeGroupKey(group, actor);
+    std::string const detail = "action_id=" + actionId + " npc=" + source->GetNameForLocaleIdx(locale)
+        + " menu_id=" + std::to_string(gossip.GetMenuId())
+        + " gossip_options=" + std::to_string(gossip.GetMenuItemCount())
+        + " quest_options=" + std::to_string(quests.GetMenuItemCount());
+    PublishEvent(groupKey, "npc_dialog", actor->GetName(), actor->GetMapId(), actor->GetInstanceId(),
+        actor->GetZoneId(), payload.str(), detail);
 }
 
 std::string GetWorldChatContext(Player const* player)

@@ -17,6 +17,9 @@ struct ActionResult
 // Called only by the world-thread console command. All inputs are typed scalar tokens;
 // model-generated free-form text is never interpreted as a server command.
 ActionResult DispatchTypedAction(std::string const& actorName, std::string const& requesterName,
-    std::string const& groupId, std::string const& actionId, std::string const& actionType);
+    std::string const& groupId, std::string const& actionId, std::string const& actionType,
+    std::string const& spellId, std::string const& targetGuid, std::string const& optionIndex);
+
+void UpdatePendingTypedActions();
 
 #endif

@@ -234,10 +234,15 @@ def build_agent_context(
     cursor: dict[str, Any] | None = None,
     event_limit: int = 40,
     member_name: str | None = None,
+    requester_name: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Render current state and unseen events as observational JSON, not chat history."""
     previous = cursor if isinstance(cursor, dict) else {}
-    snapshot = read_latest_snapshot(directory, member_name=member_name)
+    # Prefer a snapshot from the sender's group so an offline bridge bot can still
+    # reason about the shared world without borrowing another member's character data.
+    snapshot = read_latest_snapshot(directory, member_name=requester_name) if requester_name else None
+    if snapshot is None and member_name:
+        snapshot = read_latest_snapshot(directory, member_name=member_name)
     if snapshot is None:
         unavailable = {
             "available": False,
@@ -283,6 +288,15 @@ def build_agent_context(
 
     context = {
         "available": True,
+        "actor_member": member_name,
+        "actor_member_present": any(
+            isinstance(member, dict) and member.get("name") == member_name
+            for member in snapshot.get("group", [])
+        ) if member_name else None,
+        "requester_member_present": any(
+            isinstance(member, dict) and member.get("name") == requester_name
+            for member in snapshot.get("group", [])
+        ) if requester_name else None,
         "freshness": "stale" if snapshot.get("_stale") else "fresh",
         "age_seconds": snapshot.get("_age_seconds"),
         "clock_skew": bool(snapshot.get("_clock_skew", False)),
