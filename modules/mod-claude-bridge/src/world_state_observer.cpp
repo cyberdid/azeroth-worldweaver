@@ -949,6 +949,8 @@ namespace
             RememberObservedObject(object, context.key);
 
             bool const lineOfSight = nearest->IsWithinLOSInMap(object);
+            Creature* creature = object->ToCreature();
+            bool const attackableByNearestMember = creature && nearest->IsValidAttackTarget(creature);
             if (i)
                 out << ',';
 
@@ -959,11 +961,10 @@ namespace
                 << ",\"distance\":" << nearby[i].distance
                 << ",\"nearest_member\":\"" << JsonEscape(nearest->GetName()) << "\"";
 
-            if (Creature* creature = object->ToCreature())
+            if (creature)
             {
                 CreatureTemplate const* creatureTemplate = creature->GetCreatureTemplate();
                 std::vector<std::string> const npcRoles = GetNpcRoles(creature);
-                bool const attackableByNearestMember = nearest->IsValidAttackTarget(creature);
                 out << ",\"type\":\"creature\",\"name\":\"" << JsonEscape(creature->GetNameForLocaleIdx(locale))
                     << "\",\"entry\":" << creature->GetEntry()
                     << ",\"level\":" << unsigned(creature->GetLevel())
@@ -1000,7 +1001,7 @@ namespace
                 << " instance=" << object->GetInstanceId() << " phase=" << object->GetPhaseMask()
                 << " LOS=" << (lineOfSight ? "yes" : "no")
                 << " near=" << nearest->GetName();
-            if (Creature* creature = object->ToCreature())
+            if (creature)
             {
                 CreatureTemplate const* creatureTemplate = creature->GetCreatureTemplate();
                 std::vector<std::string> const npcRoles = GetNpcRoles(creature);
