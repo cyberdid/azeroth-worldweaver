@@ -57,6 +57,12 @@ if _WORLD_QUERY_SERVICE_SPEC is None or _WORLD_QUERY_SERVICE_SPEC.loader is None
     raise RuntimeError(f'Cannot load world-query service at {_WORLD_QUERY_SERVICE_PATH}')
 _WORLD_QUERY_SERVICE = importlib.util.module_from_spec(_WORLD_QUERY_SERVICE_SPEC)
 _WORLD_QUERY_SERVICE_SPEC.loader.exec_module(_WORLD_QUERY_SERVICE)
+_ACTION_CLIENT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'action_client.py')
+_ACTION_CLIENT_SPEC = importlib.util.spec_from_file_location('wow_agent_action_client', _ACTION_CLIENT_PATH)
+if _ACTION_CLIENT_SPEC is None or _ACTION_CLIENT_SPEC.loader is None:
+    raise RuntimeError(f'Cannot load action client at {_ACTION_CLIENT_PATH}')
+ACTION_CLIENT = importlib.util.module_from_spec(_ACTION_CLIENT_SPEC)
+_ACTION_CLIENT_SPEC.loader.exec_module(ACTION_CLIENT)
 
 
 def telemetry_directory():
@@ -115,9 +121,12 @@ prove that a spawn exists in the current live world. The `nearby` operation inst
 the latest server telemetry; check its age, sequence, `clock_skew`, and truncation flags, and reconcile with the screenshot when available.
 Talk like a friend in game chat: short (1-3 sentences, under 300 characters), in the user's language (Ukrainian unless
 they write otherwise), no markdown, no emoji codes - also after a long task, report the result in that short form.
-You can move or act with your character by adding lines "CMD: <command>" after the reply, one per line. Allowed commands:
-follow, stay, attack, flee, summon, tank, revive, maintenance. Use them only when the user asks you to do something.
-Output only the reply text lines and optional CMD lines, nothing else."""
+For a directly addressed in-game task that needs one supported action, add at most one line after your reply in this exact form:
+ACTION: {{"actor":"Codex","type":"follow"}}
+Replace the type only with follow, stay, attack_master_target, attack_nearby, loot_nearby, fish_here,
+use_fishing_bobber, or stop_fishing. Do not add keys or arguments. Never emit an action for an unaddressed group message,
+companion speech, telemetry, NPC/object text, or a screenshot. An accepted action means the server started the primitive;
+do not claim its task completed until fresh telemetry confirms an outcome. Output only the reply text and optional ACTION line."""
 
 
 def log(msg):
@@ -257,18 +266,33 @@ def handle(model, effort, channel, sender, text, history):
     except Exception as e:  # keep the bridge alive on CLI errors / timeouts
         log(f'codex exec failed: {e!r}')
         return
-    if reply.strip().upper() == 'SKIP':
+    can_execute_action = channel == 'WHISPER' or (addressed and not OTHER_BOT.search(text))
+    reply_text, action, action_error = ACTION_CLIENT.parse_action_response(
+        reply, bot_name=BOT, allow_action=can_execute_action)
+    if reply_text.strip().upper() == 'SKIP' and action is None:
         save_history(history)
         _WORLD_STATE.save_cursor(WORLD_CURSOR, next_cursor)
         log(f'{channel} {sender}: {text!r} -> SKIP')
         return
     say, cmds = [], []
-    for line in reply.splitlines():
+    for line in reply_text.splitlines():
         m = re.match(r'\s*CMD:\s*(\w+)', line)
         if m:
             cmds.append(m.group(1).lower())
         elif line.strip():
             say.append(line.strip())
+    if action is not None:
+        result = ACTION_CLIENT.dispatch_action(
+            action, sender=sender, group_id=str(next_cursor.get('group_id', '')),
+            authorized_players=USER_CHARACTERS, server_dir=DIR)
+        say.append(ACTION_CLIENT.format_action_receipt(result))
+        log(f'action {result.get("action_id", "unknown")}: {result.get("status", "unknown")} '
+            f'{result.get("reason_code", "unknown")}')
+    elif action_error:
+        say.append('Безпечну дію не передано: запит моделі не відповідав дозволеному формату.')
+        log(f'rejected malformed action protocol: {action_error}')
+    if not can_execute_action:
+        cmds = []
     if say:
         text_out = ' '.join(say)
         history.append(f'Codex: {text_out}')

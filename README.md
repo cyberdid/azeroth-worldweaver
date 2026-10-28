@@ -32,8 +32,8 @@ This is a **public experimental snapshot**, not a ready-to-install release. The 
 | Authenticated chat authority | Both adapters use a configurable exact sender allowlist; empty by default, so no character can start a task until configured |
 | World-state snapshot and event writer | On 2026-10-28, live group snapshot sequence 713 contained all 3 group members and 109 nearby objects under the 500-object cap, with no truncation, 109 facing angles, and zero dropped events/records/snapshots. Worldserver `server info` reported 4/6/7 ms p95/99/max with one connected player. Clean public install, dense-area cost, and fresh model responses remain unverified |
 | Screenshot capture | Both adapters now capture only for explicit visual requests; a private inter-process lock makes them share one recent verified-window frame. Background capture is disabled, ordinary prompts do not attach an older frame, and fresh model consumption by both agents remains unverified |
-| Ordinary-language requests converted into fully validated game actions | Design and initial playerbot action mappings are documented; the typed server dispatcher is not implemented |
-| End-to-end in-game validation | Shared telemetry and Codex visual capture were observed live; the Claude chat adapter is running but has not handled a fresh game message yet |
+| Ordinary-language requests converted into game actions | Both adapters now accept one directly addressed typed request for follow, stay, target/nearby attack, loot, and fishing actions; the server validates sender, group, actor, and selected target, then journals a correlated acknowledgement. The server was built and deployed on 2026-10-28; in-game execution remains unverified |
+| End-to-end in-game validation | Shared telemetry and Codex visual capture were observed live; after the latest restart, no human player is online yet, so a real action and fresh Claude response remain to be checked |
 
 This AzerothCore tree discovers module directories from their source layout and recursively collects source files during CMake configuration; it does not require a module-specific `CMakeLists.txt`. Reconfigure an existing build tree after adding the observer and writer `.cpp` files so CMake collects them. On the author's private host, the observer was compiled from the local Playerbot worktree, installed, restarted, and verified with a fresh group snapshot containing the new inventory and creature fields. This confirms one private deployment only; it is not a clean public install procedure. The `Object.h` compatibility change required by the observer is provided as a small patch under `patches/azerothcore/`.
 
@@ -92,6 +92,8 @@ WOW_AGENT_BOT_NAME=Claude WOW_AGENT_OTHER_BOT=Codex \
 
 The Claude bridge uses safe mode, read-only file tools, and a restricted command pattern for the typed world-query client; its in-game action directives are separately limited to a fixed allowlist.
 
+The server module has a separate `ClaudeBridge.AuthorizedPlayers` allowlist for typed actions. Add the exact character names to the local `etc/modules/claude_bridge.conf`; an empty value denies all actions. The initial server allowlist maps only `follow`, `stay`, `attack_master_target`, `attack_nearby`, `loot_nearby`, `fish_here`, `use_fishing_bobber`, and `stop_fishing` to existing playerbot actions. A server acknowledgement means the primitive started, not that the larger task completed. The adapters never translate model output into an arbitrary server command.
+
 `WOW_AGENT_AUTHORIZED_PLAYERS` is intentionally empty by default. Use the exact in-game character names that are allowed to initiate tasks. Keep the telemetry directory private to the local account; it contains world state and may contain screenshots.
 
 The Codex CLI sandbox defaults to `workspace-write`. `danger-full-access` is available only as an explicit operator setting; it gives the model access to commands and files available to the local account. Review the security implications before enabling it, and never expose the chat bridge to untrusted players.
@@ -126,8 +128,8 @@ When Claude cannot read the server configuration, the Codex bridge can expose a 
 2. Confirm the post-restart snapshot, detailed item/creature fields, event journal, and freshness reporting on the private server; repeat on a clean public install.
 3. Confirm the same post-restart snapshot and static-query results are consumable by both agent adapters; a fresh message after the latest restart is still needed.
 4. Verify both agent image paths against an open client and matching live snapshot.
-5. Implement a typed, server-validated action dispatcher with correlated acknowledgements and observed outcomes.
-6. Run a documented in-game validation pass before calling a release stable.
+5. Compile and deploy the typed, server-validated action dispatcher; verify that both adapters receive correlated acknowledgements.
+6. Run a documented in-game validation pass for follow, combat, loot, fishing, screenshots, and both agent consumers before calling a release stable.
 
 The component-specific design notes and acceptance checklists live in [`docs/`](docs/).
 

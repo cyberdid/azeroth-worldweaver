@@ -3,9 +3,16 @@
 #
 #    ClaudeBridge.BotNames
 #        Description: Comma separated character names of the playerbots that external agents speak and act through.
-#        Default:     "Claude"
+#        Default:     "Claude,Codex"
 #
-ClaudeBridge.BotNames = "Claude"
+ClaudeBridge.BotNames = "Claude,Codex"
+
+#
+#    ClaudeBridge.AuthorizedPlayers
+#        Description: Comma separated in-game character names allowed to issue typed bot actions. Empty denies all.
+#        Default:     ""
+#
+ClaudeBridge.AuthorizedPlayers = ""
 
 #
 #    ClaudeBridge.LogDir
@@ -25,9 +32,9 @@ ClaudeBridge.TelemetryDir = "/var/lib/azeroth-worldweaver"
 #
 #    ClaudeBridge.ChatContextBotNames
 #        Description: Bridge bots that receive a compact cached world observation attached to each real incoming chat line.
-#        Default:     "Claude"
+#        Default:     "Claude,Codex"
 #
-ClaudeBridge.ChatContextBotNames = "Claude"
+ClaudeBridge.ChatContextBotNames = "Claude,Codex"
 
 #
 #    ClaudeBridge.TelemetryIntervalMs

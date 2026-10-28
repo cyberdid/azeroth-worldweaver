@@ -1515,6 +1515,37 @@ namespace
     };
 }
 
+void PublishActionResultEvent(Player* requester, std::string const& actorName,
+    std::string const& actionId, std::string const& actionType,
+    std::string const& status, std::string const& reasonCode)
+{
+    if (!requester || !requester->IsInWorld() || !requester->GetGroup()
+        || (status != "accepted" && status != "rejected"))
+        return;
+
+    Group* group = requester->GetGroup();
+    bool hasBridgeBot = false;
+    for (GroupReference* itr = group->GetFirstMember(); itr; itr = itr->next())
+        if (Player* member = itr->GetSource(); member && member->IsInWorld() && IsBridgeBot(member->GetName()))
+        {
+            hasBridgeBot = true;
+            break;
+        }
+    if (!hasBridgeBot)
+        return;
+
+    std::string const groupKey = MakeGroupKey(group, requester);
+    std::string const eventType = status == "accepted" ? "action_accepted" : "action_rejected";
+    std::string const payload = "{\"action_id\":\"" + JsonEscape(actionId)
+        + "\",\"action\":\"" + JsonEscape(actionType)
+        + "\",\"status\":\"" + JsonEscape(status)
+        + "\",\"reason_code\":\"" + JsonEscape(reasonCode) + "\"}";
+    std::string const detail = "action_id=" + actionId + " action=" + actionType
+        + " status=" + status + " reason=" + reasonCode;
+    PublishEvent(groupKey, eventType, actorName, requester->GetMapId(), requester->GetInstanceId(),
+        requester->GetZoneId(), payload, detail);
+}
+
 std::string GetWorldChatContext(Player const* player)
 {
     if (!player || !player->IsInWorld())

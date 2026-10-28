@@ -35,6 +35,7 @@
 #include "WorldPacket.h"
 #include "World.h"
 #include "WorldSessionMgr.h"
+#include "action_dispatcher.h"
 #include "world_state_observer.h"
 #include "world_state_writer.h"
 
@@ -221,6 +222,7 @@ public:
             {"party",   HandleParty,   SEC_ADMINISTRATOR, Console::Yes},
             {"whisper", HandleWhisper, SEC_ADMINISTRATOR, Console::Yes},
             {"cmd",     HandleCmd,     SEC_ADMINISTRATOR, Console::Yes},
+            {"action",  HandleAction,  SEC_ADMINISTRATOR, Console::Yes},
         };
         static ChatCommandTable commandTable = {
             {"claude", claudeTable},
@@ -294,6 +296,22 @@ public:
         replayingCommand = false;
         if (!passed)
             handler->PSendSysMessage("claude: command was consumed by a chat hook");
+        return true;
+    }
+
+    // Typed bridge action: all values are bounded scalar tokens and the dispatcher maps
+    // the final enum to a fixed PlayerbotAI action. This command is SOAP/console-only.
+    static bool HandleAction(ChatHandler* handler, std::string actorName, std::string requesterName,
+        std::string groupId, std::string actionId, std::string actionType)
+    {
+        if (!handler->IsConsole())
+        {
+            handler->SendSysMessage("claude: typed actions are console-only");
+            return false;
+        }
+
+        ActionResult const result = DispatchTypedAction(actorName, requesterName, groupId, actionId, actionType);
+        handler->PSendSysMessage("ACTION_RESULT: {}", result.ToJson());
         return true;
     }
 };
