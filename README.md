@@ -29,12 +29,12 @@ This is a **public experimental snapshot**, not a ready-to-install release. The 
 | Fixed-operation, read-only world database lookups | Implemented; fishing and loot references can expand into bounded item rows |
 | Shared request relay for an agent without database-file access | Implemented in the Codex bridge; a second adapter still needs an end-to-end check |
 | Authenticated chat authority in the Codex adapter | Configurable sender allowlist; empty by default, so no character can start a task until configured |
-| World-state snapshot and event writer | C++ source is present; build integration and live activation are not complete |
+| World-state snapshot and event writer | C++ source includes richer NPC, target, cast, fishing-object, and member equipment details; the generated build tree is stale and live activation is not complete |
 | Screenshot capture | Helper is present; it captures only a verified, mapped WoW X11 window; real client delivery remains unverified |
 | Ordinary-language requests converted into fully validated game actions | Design and initial playerbot action mappings are documented; the typed server dispatcher is not implemented |
 | End-to-end in-game validation | Not yet performed for this public snapshot |
 
-The source tree currently lacks a finished AzerothCore module build-registration file. The `Object.h` compatibility change required by the observer is provided as a small patch under `patches/azerothcore/`. **Do not treat the C++ observer as compiled or active.**
+This AzerothCore tree discovers module directories from their source layout and recursively collects source files during CMake configuration; it does not require a module-specific `CMakeLists.txt`. The generated build tree must be reconfigured to include the newly added observer and writer `.cpp` files, then compiled. The `Object.h` compatibility change required by the observer is provided as a small patch under `patches/azerothcore/`. **Do not treat the C++ observer as compiled or active.**
 
 ## Design principles
 
@@ -110,7 +110,7 @@ When Claude cannot read the server configuration, the Codex bridge can expose a 
 
 ## Roadmap
 
-1. Finish the module's CMake/build registration and compile it against a supported AzerothCore checkout.
+1. Reconfigure CMake so the generated build includes the new observer/writer sources, then compile against a supported AzerothCore checkout.
 2. Activate and validate the shared observer, event journal, and freshness reporting on a test server.
 3. Confirm the same snapshot and static-query results are consumable by both agent adapters.
 4. Verify the WoW-window screenshot path with an open client and matching live snapshot.

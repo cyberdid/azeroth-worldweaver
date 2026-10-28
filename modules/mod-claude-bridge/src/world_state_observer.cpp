@@ -186,6 +186,61 @@ namespace
         return escaped;
     }
 
+    std::vector<std::string> GetNpcRoles(Creature const* creature)
+    {
+        std::vector<std::string> roles;
+        if (!creature)
+            return roles;
+
+        if (creature->IsQuestGiver())
+            roles.emplace_back("quest_giver");
+        if (creature->HasNpcFlag(UNIT_NPC_FLAG_VENDOR_MASK))
+            roles.emplace_back("vendor");
+        if (creature->HasNpcFlag(UNIT_NPC_FLAG_TRAINER | UNIT_NPC_FLAG_TRAINER_CLASS | UNIT_NPC_FLAG_TRAINER_PROFESSION))
+            roles.emplace_back("trainer");
+        if (creature->IsTaxi())
+            roles.emplace_back("flight_master");
+        if (creature->IsInnkeeper())
+            roles.emplace_back("innkeeper");
+        if (creature->IsBanker())
+            roles.emplace_back("banker");
+        if (creature->IsArmorer())
+            roles.emplace_back("repair");
+        if (creature->IsAuctioner())
+            roles.emplace_back("auctioneer");
+        if (creature->IsBattleMaster())
+            roles.emplace_back("battle_master");
+        if (creature->IsSpiritHealer())
+            roles.emplace_back("spirit_healer");
+        if (creature->IsSpiritGuide())
+            roles.emplace_back("spirit_guide");
+        if (creature->HasNpcFlag(UNIT_NPC_FLAG_PETITIONER))
+            roles.emplace_back("guild_petitioner");
+        if (creature->HasNpcFlag(UNIT_NPC_FLAG_STABLEMASTER))
+            roles.emplace_back("stable_master");
+        if (creature->HasNpcFlag(UNIT_NPC_FLAG_GUILD_BANKER))
+            roles.emplace_back("guild_banker");
+        if (creature->HasNpcFlag(UNIT_NPC_FLAG_MAILBOX))
+            roles.emplace_back("mailbox");
+        if (creature->HasNpcFlag(UNIT_NPC_FLAG_SPELLCLICK))
+            roles.emplace_back("spell_click");
+        if (creature->IsGossip())
+            roles.emplace_back("gossip");
+        return roles;
+    }
+
+    void AppendNpcRolesJson(std::ostringstream& out, std::vector<std::string> const& roles)
+    {
+        out << '[';
+        for (std::size_t i = 0; i < roles.size(); ++i)
+        {
+            if (i)
+                out << ',';
+            out << '"' << JsonEscape(roles[i]) << '"';
+        }
+        out << ']';
+    }
+
     void TruncateUtf8(std::string& value, std::size_t limit)
     {
         if (value.size() <= limit)
@@ -630,6 +685,8 @@ namespace
             AreaTableEntry const* area = sAreaTableStore.LookupEntry(member->GetAreaId());
             AreaTableEntry const* zone = sAreaTableStore.LookupEntry(member->GetZoneId());
             Unit* target = member->GetSelectedUnit();
+            if (target == member)
+                target = nullptr;
             Spell* genericCast = member->GetCurrentSpell(CURRENT_GENERIC_SPELL);
             Spell* channelCast = member->GetCurrentSpell(CURRENT_CHANNELED_SPELL);
 
@@ -661,7 +718,11 @@ namespace
                     << ",\"guid\":\"" << target->GetGUID().GetRawValue()
                     << "\",\"health_pct\":" << target->GetHealthPct()
                     << ",\"distance\":" << member->GetDistance(target)
-                    << ",\"line_of_sight\":" << (member->IsWithinLOSInMap(target) ? "true" : "false") << '}';
+                    << ",\"line_of_sight\":" << (member->IsWithinLOSInMap(target) ? "true" : "false")
+                    << ",\"is_player\":" << (target->IsPlayer() ? "true" : "false")
+                    << ",\"is_creature\":" << (target->IsCreature() ? "true" : "false")
+                    << ",\"hostile_to_member\":" << (member->IsHostileTo(target) ? "true" : "false")
+                    << ",\"in_combat\":" << (target->IsInCombat() ? "true" : "false") << '}';
             else
                 out << "null";
 
@@ -673,7 +734,10 @@ namespace
                     if (!firstCast)
                         out << ',';
                     firstCast = false;
-                    out << "{\"spell_id\":" << spell->GetSpellInfo()->Id << '}';
+                    SpellInfo const* spellInfo = spell->GetSpellInfo();
+                    char const* spellName = spellInfo->SpellName[locale];
+                    out << "{\"spell_id\":" << spellInfo->Id
+                        << ",\"name\":\"" << JsonEscape(spellName ? spellName : "") << "\"}";
                 }
             out << "]"
                 << ",\"skills\":{\"fishing\":" << member->GetSkillValue(SKILL_FISHING)
@@ -739,7 +803,10 @@ namespace
                     out << ',';
                 firstAura = false;
                 ++auraCount;
-                out << "{\"spell_id\":" << aura->GetSpellInfo()->Id
+                SpellInfo const* spellInfo = aura->GetSpellInfo();
+                char const* auraName = spellInfo->SpellName[locale];
+                out << "{\"spell_id\":" << spellInfo->Id
+                    << ",\"name\":\"" << JsonEscape(auraName ? auraName : "") << '"'
                     << ",\"duration_ms\":" << aura->GetDuration() << '}';
             }
             out << ']';
@@ -812,13 +879,40 @@ namespace
             << "Group members:\n";
         for (Player* member : context.members)
             if (member && member->IsInWorld())
+            {
                 compact << "- " << member->GetName() << " level " << unsigned(member->GetLevel())
                     << " map=" << member->GetMapId() << " instance=" << member->GetInstanceId()
                     << " zone=" << member->GetZoneId()
                     << " pos=" << std::fixed << std::setprecision(1) << member->GetPositionX() << ','
                     << member->GetPositionY() << ',' << member->GetPositionZ()
                     << " hp=" << unsigned(member->GetHealthPct()) << "% mana=" << unsigned(member->GetPowerPct(POWER_MANA))
-                    << "% combat=" << (member->IsInCombat() ? "yes" : "no") << '\n';
+                    << "% combat=" << (member->IsInCombat() ? "yes" : "no")
+                    << " fishing=" << member->GetSkillValue(SKILL_FISHING) << '/' << member->GetMaxSkillValue(SKILL_FISHING);
+
+                Unit* target = member->GetSelectedUnit();
+                if (target && target != member)
+                    compact << " target=" << target->GetNameForLocaleIdx(locale)
+                        << " target_hp=" << unsigned(target->GetHealthPct()) << "%"
+                        << " target_hostile=" << (member->IsHostileTo(target) ? "yes" : "no")
+                        << " target_los=" << (member->IsWithinLOSInMap(target) ? "yes" : "no");
+
+                Item* mainHand = member->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND);
+                ItemTemplate const* mainHandTemplate = mainHand ? mainHand->GetTemplate() : nullptr;
+                if (mainHandTemplate)
+                    compact << " main_hand=" << mainHandTemplate->Name1;
+
+                for (Spell* spell : {member->GetCurrentSpell(CURRENT_GENERIC_SPELL),
+                    member->GetCurrentSpell(CURRENT_CHANNELED_SPELL)})
+                    if (spell && spell->GetSpellInfo())
+                    {
+                        char const* spellName = spell->GetSpellInfo()->SpellName[locale];
+                        compact << " casting=" << (spellName ? spellName : "unknown spell")
+                            << "#" << spell->GetSpellInfo()->Id;
+                    }
+                compact << '\n';
+            }
+        compact << "Live npc_roles are server service flags, not proof a specific quest is available. "
+            << "fishing_node/fishing_hole identify live object types.\n";
         compact << "Nearest loaded same-phase objects (max " << nearby.size() << "):";
         for (std::size_t i = 0; i < nearby.size(); ++i)
         {
@@ -841,18 +935,33 @@ namespace
                 << ",\"nearest_member\":\"" << JsonEscape(nearest->GetName()) << "\"";
 
             if (Creature* creature = object->ToCreature())
+            {
+                CreatureTemplate const* creatureTemplate = creature->GetCreatureTemplate();
+                std::vector<std::string> const npcRoles = GetNpcRoles(creature);
                 out << ",\"type\":\"creature\",\"name\":\"" << JsonEscape(creature->GetNameForLocaleIdx(locale))
                     << "\",\"entry\":" << creature->GetEntry()
                     << ",\"level\":" << unsigned(creature->GetLevel())
-                    << ",\"health_pct\":" << creature->GetHealthPct()
+                    << ",\"creature_type_id\":" << creature->GetCreatureType()
+                    << ",\"rank\":" << (creatureTemplate ? unsigned(creatureTemplate->rank) : 0)
+                    << ",\"faction_id\":" << creature->GetFaction()
+                    << ",\"npc_flags\":" << static_cast<uint32>(creature->GetNpcFlags())
+                    << ",\"npc_roles\":";
+                AppendNpcRolesJson(out, npcRoles);
+                out << ",\"health_pct\":" << creature->GetHealthPct()
                     << ",\"alive\":" << (creature->IsAlive() ? "true" : "false")
                     << ",\"in_combat\":" << (creature->IsInCombat() ? "true" : "false")
                     << ",\"hostile_to_nearest_member\":" << (creature->IsHostileTo(nearest) ? "true" : "false")
                     << ",\"victim\":\"" << JsonEscape(creature->GetVictim() ? creature->GetVictim()->GetNameForLocaleIdx(locale) : "") << '"';
+            }
             else if (GameObject* gameObject = object->ToGameObject())
                 out << ",\"type\":\"gameobject\",\"name\":\"" << JsonEscape(gameObject->GetNameForLocaleIdx(locale))
                     << "\",\"entry\":" << gameObject->GetEntry()
-                    << ",\"state\":" << unsigned(gameObject->GetGoState());
+                    << ",\"state\":" << unsigned(gameObject->GetGoState())
+                    << ",\"gameobject_type_id\":" << unsigned(gameObject->GetGoType())
+                    << ",\"fishing_node\":" << (gameObject->GetGoType() == GAMEOBJECT_TYPE_FISHINGNODE ? "true" : "false")
+                    << ",\"fishing_hole\":" << (gameObject->GetGoType() == GAMEOBJECT_TYPE_FISHINGHOLE ? "true" : "false")
+                    << ",\"loot_state_id\":" << unsigned(gameObject->getLootState())
+                    << ",\"spawned\":" << (gameObject->isSpawned() ? "true" : "false");
             else
                 out << ",\"type\":\"world_object\",\"entry\":" << object->GetEntry();
             out << '}';
@@ -864,11 +973,31 @@ namespace
                 << " LOS=" << (lineOfSight ? "yes" : "no")
                 << " near=" << nearest->GetName();
             if (Creature* creature = object->ToCreature())
+            {
+                CreatureTemplate const* creatureTemplate = creature->GetCreatureTemplate();
+                std::vector<std::string> const npcRoles = GetNpcRoles(creature);
                 compact << " name=" << creature->GetNameForLocaleIdx(locale) << " level=" << unsigned(creature->GetLevel())
+                    << " creature_type=" << creature->GetCreatureType()
+                    << " rank=" << (creatureTemplate ? unsigned(creatureTemplate->rank) : 0)
                     << " hp=" << unsigned(creature->GetHealthPct()) << "% alive=" << (creature->IsAlive() ? "yes" : "no")
                     << " hostile=" << (creature->IsHostileTo(nearest) ? "yes" : "no");
+                if (!npcRoles.empty())
+                {
+                    compact << " roles=";
+                    for (std::size_t roleIndex = 0; roleIndex < npcRoles.size(); ++roleIndex)
+                    {
+                        if (roleIndex)
+                            compact << ',';
+                        compact << npcRoles[roleIndex];
+                    }
+                }
+            }
             else if (GameObject* gameObject = object->ToGameObject())
-                compact << " name=" << gameObject->GetNameForLocaleIdx(locale) << " state=" << unsigned(gameObject->GetGoState());
+                compact << " name=" << gameObject->GetNameForLocaleIdx(locale) << " state=" << unsigned(gameObject->GetGoState())
+                    << " gameobject_type=" << unsigned(gameObject->GetGoType())
+                    << " fishing_node=" << (gameObject->GetGoType() == GAMEOBJECT_TYPE_FISHINGNODE ? "yes" : "no")
+                    << " fishing_hole=" << (gameObject->GetGoType() == GAMEOBJECT_TYPE_FISHINGHOLE ? "yes" : "no")
+                    << " loot_state=" << unsigned(gameObject->getLootState());
         }
         out << "]}";
         compact << "\nRecent world events:";
