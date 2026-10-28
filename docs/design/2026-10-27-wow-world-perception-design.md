@@ -1,7 +1,7 @@
 # WoW World Perception and Agent Interaction
 
 Date: 2026-10-27
-Status: design approved; implementation in progress. The bounded static-world query relay is installed in the Codex bridge and has returned read-only database results. The shared observer has compiled against the local Playerbot worktree, but its binary is not installed or running; screenshots and live telemetry still need deployment and in-game confirmation.
+Status: design approved; a private local deployment is running. The bounded static-world query relay has returned read-only results, the shared observer is writing one-second snapshots and events, and the Codex window image was captured and matched to a live snapshot. The Claude chat adapter is now running with xhigh effort, but its first fresh in-game response and visual input are still unverified. A clean public installation and the full action loop remain incomplete.
 
 ## Goal
 
@@ -11,12 +11,12 @@ The user is the task authority. Claude and Codex control their existing playerbo
 
 ## Current state and constraints
 
-- `modules/mod-claude-bridge/src/claude_bridge.cpp` collects a snapshot only when relevant party or whisper chat arrives. The snapshot includes group positions and basic state, plus up to 40 nearby creatures/game objects in the members' current phase and visibility range, capped at 100 yards.
-- The snapshot is written to each bot's chat log as `BOTSAY|WorldServer|<JSON>`. `codex-bridge.py` retains `BOTSAY` as context. The active Claude tail command filters every `BOTSAY` line, so Claude does not receive those snapshots automatically.
-- Codex runs an ephemeral `codex exec` for each message and uses recent chat history. It currently permits a small fixed list of playerbot commands.
+- The installed observer writes one shared snapshot per second while the bridge group is online. It includes group positions and state, equipment, skills, auras, quests, and up to 40 nearby same-phase creatures/game objects within 100 yards.
+- The observer writes meaningful changes to a bounded event journal. The server also attaches a compact observation and stable snapshot/event/image/query paths to each authenticated incoming chat record; telemetry itself never starts a reply.
+- Separate Codex and Claude adapters read their respective bot logs, use the same snapshot/event reader, and preserve short chat history. Both require exact authorized-character allowlists. Codex attaches a verified image to `codex exec`; Claude uses Claude Code print mode with safe mode, read-only file tools, and a fixed-operation query client.
 - The server has script hooks for world ticks, unit combat/death, player spell casts, quest changes, loot, fishing-skill changes, creature spawn/despawn, and game-object spawn/despawn/state changes.
-- The prepared observer serializer adds live creature service clues (`npc_roles`, raw NPC flags, creature type/rank/faction) and live game-object type/state, including fishing-node and fishing-hole markers. Member context also includes fishing skill, main-hand item, selected-target hostility/line of sight, and localized active-cast/aura names. These fields are in source but are not active until the server is rebuilt and restarted; a service flag does not establish that a particular quest is available.
-- X11 tools `xprop`, `xwininfo`, and `xwd` plus Pillow are installed. Pillow has no XWD plugin, so the helper decodes the captured XWD pixel data itself. The WoW client is not currently available for a live capture, so real image inspection and forwarding remain to be verified.
+- Live creature and game-object fields include service clues (`npc_roles`, raw NPC flags, creature type/rank/faction), fishing-node/fishing-hole markers, visibility/line of sight, target hostility, fishing skill, equipped items, casts, auras, and active quest progress. These are server observations; role flags do not prove a specific quest is offered.
+- X11 capture was verified against a live WoW window (`0x4200007`, PID 46004, 2560x1600) and decoded as a color X11 visual. The helper requires WoW to be the active window and correctly reports unavailable when it is obscured; Claude's image-read path has not yet been exercised by an incoming game message.
 - `Spell.cpp`, `SpellInfoCorrections.cpp`, and `spell_generic.cpp` already have user changes. Implementation must leave them untouched.
 - `$WOW_ROOT/AGENTS.md` requires approval before a worldserver restart, rebuild, or database change. This design avoids database writes; deploying its server module changes will still require a rebuild and restart.
 
@@ -45,14 +45,14 @@ The query interface must label results as `live`, `static_spawn`, or `inferred`.
 Both agents consume the same schema and sequence numbers.
 
 - Codex reads the newest snapshot and events since its cursor when forming a response. Telemetry is structured context, not a user message, and does not trigger a reply by itself.
-- Codex reads the newest snapshot and events since its cursor before answering. Claude's existing tail monitor remains a user-chat channel: for Claude's chat log, the server adds a compact world observation to the same incoming user-message record and includes the shared snapshot path. The full snapshot and event journal live under Claude's working tree, so it can inspect details without widening system sandbox permissions. No separate telemetry line can trigger an agent reply.
+- Codex reads the newest snapshot and events since its cursor before answering. The Claude bridge follows Claude's per-bot chat log, adds the same compact observation to an authenticated incoming message, and reads the shared snapshot, event journal, typed-query client, and validated screenshot path. No separate telemetry line can trigger an agent reply.
 - Each adapter tracks the last consumed sequence and reports gaps/staleness. Prompt history contains summaries and references, not repeated full snapshots.
 
 ### 4. Game-window screenshots
 
 Add a capture helper that locates the mapped WoW client window by verified title/process identity, captures only that window through X11, and converts the result to PNG. Never capture the whole desktop. A screenshot is captured on explicit visual questions and after important action milestones; a configurable low-rate cadence may be enabled during a long-running task if the client and model adapters support it.
 
-Each image has a timestamp, window identity, and matching world-state sequence. The current adapter design refreshes a shared image at a bounded five-second cadence and before real user prompts; future action milestones can request an immediate refresh. If the game window is absent, minimized/unmapped, or ambiguous, report that no current image is available instead of substituting another window. Codex attaches the PNG to its prompt; Claude receives the shared metadata path with the real chat message and can inspect the same file. Verify both model paths before claiming live visual access.
+Each image has a timestamp, window identity, and matching world-state sequence. The Codex adapter refreshes a shared image at a bounded five-second cadence and before real user prompts; future action milestones can request an immediate refresh. If the game window is absent, minimized/unmapped, occluded, or ambiguous, report that no current image is available instead of substituting another window. Codex attaches the PNG to its prompt; Claude receives the shared metadata path with the real chat message and can inspect the same file. Verify both model paths before claiming live visual access.
 
 ### 5. Natural-language task and action loop
 

@@ -28,11 +28,11 @@
 **Interface:**
 - `capture_game_window(snapshot_path, output_dir, min_interval_seconds=5) -> dict` returns availability, PNG path, capture time, window/process identity, group/session/snapshot identity, freshness, and a failure reason.
 
-- [ ] Enumerate mapped top-level X11 windows; retain only those whose title/class identifies World of Warcraft and whose `_NET_WM_PID` command line identifies the WoW Wine client.
-- [ ] Return an unavailable result when zero or multiple candidates remain, the window is hidden/minimized, or process identity cannot be verified; atomically invalidate the shared sidecar on failure.
-- [ ] Capture pixels from the selected X11 window ID only; do not call root-window capture APIs. Use `xwd -id <window-id>` and decode that window image if no direct Xlib pixel path is available.
-- [ ] Convert to RGB PNG, associate group/session/snapshot identity, revalidate the window after capture, and atomically write a JSON sidecar.
-- [ ] Enforce minimum capture interval, image size limit, restrictive file permissions, and bounded retention.
+- [x] Enumerate mapped top-level X11 windows; retain only those whose title/class identifies World of Warcraft and whose `_NET_WM_PID` command line identifies the WoW Wine client.
+- [x] Return an unavailable result when zero or multiple candidates remain, the window is hidden/minimized/occluded, or process identity cannot be verified; atomically invalidate the shared sidecar on failure.
+- [x] Capture pixels from the selected X11 window ID only; do not call root-window capture APIs. Use `xwd -id <window-id>` and decode TrueColor/DirectColor channels by their visual masks.
+- [x] Convert to RGB PNG, associate group/session/snapshot identity, revalidate the window after capture, and atomically write a JSON sidecar.
+- [x] Enforce minimum capture interval, image size limit, restrictive file permissions, and bounded retention.
 
 ### Task 2: Deliver the image to both agents
 
@@ -41,16 +41,17 @@
 - Modify: `tools/wow-agent/world_state.py`
 - Modify: `tools/wow-agent/README.md`
 
-- [ ] Refresh a shared screenshot on a bounded five-second cadence while the Codex bridge runs and before a user request; include the capture result/reason in Codex's next prompt and leave the shared metadata path available to Claude.
-- [ ] Pass the image path as a `-i <path>` argument to `codex exec` without shell interpolation; `codex exec --help` on this machine confirms the supported image option.
-- [ ] Put the stable `screenshots/latest.json` path in the compact observation already attached to Claude's real incoming message; keep Codex's capture metadata in the same prompt and emit no standalone chat record.
-- [ ] Keep the refresh on the shared five-second file-only cadence; action-milestone capture remains a later extension because the action dispatcher is not part of this phase.
-- [ ] Do not attach an image whose snapshot sequence differs from the state under discussion without explicitly marking it stale.
+- [x] Refresh a shared screenshot on a bounded five-second cadence while the Codex bridge runs and before a user request; include the capture result/reason in Codex's next prompt and leave the shared metadata path available to Claude.
+- [x] Pass the image path as a `-i <path>` argument to `codex exec` without shell interpolation; `codex exec --help` on this machine confirms the supported image option.
+- [x] Put the stable `screenshots/latest.json` path in the compact observation attached to Claude's incoming message; keep Codex's capture metadata in the same prompt and emit no standalone chat record.
+- [x] Add a Claude CLI chat adapter that reads the same state/event cursor and passes the sidecar to a read-only image-capable prompt; constrain shell access to the typed query client and game directives to an explicit allowlist.
+- [x] Keep the refresh on the shared five-second file-only cadence; action-milestone capture remains a later extension because the action dispatcher is not part of this phase.
+- [x] Do not attach an image whose snapshot sequence differs from the state under discussion without explicitly marking it stale.
 
 ### Task 3: Live visual validation
 
-- [ ] Ask the user to open the WoW client when ready; the client was absent during the design pass.
-- [ ] Confirm the selected X11 ID, title/class, PID, and command line belong to the WoW client.
-- [ ] Capture once and inspect the PNG dimensions and content; confirm no desktop or neighboring window is present.
+- [x] Ask the user to open the WoW client when ready; the user opened it for a live capture.
+- [x] Confirm the selected X11 ID, title/class, PID, and command line belong to the WoW client.
+- [x] Capture once and inspect the PNG dimensions and content; confirm no desktop or neighboring window is present.
 - [ ] Ask Codex and Claude independently to describe the same visible scene and compare their sequence/time references.
 - [ ] Minimize/close the client and confirm the helper reports unavailable rather than capturing another window.

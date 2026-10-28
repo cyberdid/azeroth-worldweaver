@@ -8,7 +8,7 @@
 [![WoW](https://img.shields.io/badge/world-WotLK%203.3.5a-435fa8?style=for-the-badge)](#requirements)
 [![License](https://img.shields.io/badge/license-GPL--2.0-blue?style=for-the-badge)](LICENSE)
 
-**Українською:** Worldweaver — експериментальний міст між приватним сервером AzerothCore та двома AI-компаньйонами. Він готує спільний контекст зі стану світу, обмежені запити до ігрових даних і перевірені знімки вікна WoW. Повний серверний спостерігач і замкнений цикл ігрових дій ще не завершені.
+**Українською:** Worldweaver — експериментальний міст між приватним сервером AzerothCore та двома AI-компаньйонами. Він передає Claude і Codex спільний контекст зі стану світу, обмежені запити до ігрових даних і метадані перевірених знімків вікна WoW. Повний замкнений цикл ігрових дій ще не завершений.
 
 <img src="assets/worldweaver-architecture.svg" alt="Worldweaver architecture: AzerothCore feeds a shared state stream to Claude and Codex; static queries and verified window captures provide additional context." width="100%">
 
@@ -27,14 +27,14 @@ This is a **public experimental snapshot**, not a ready-to-install release. The 
 | Capability | State in this snapshot |
 |---|---|
 | Fixed-operation, read-only world database lookups | Implemented; fishing and loot references can expand into bounded item rows |
-| Shared request relay for an agent without database-file access | Implemented in the Codex bridge; a second adapter still needs an end-to-end check |
-| Authenticated chat authority in the Codex adapter | Configurable sender allowlist; empty by default, so no character can start a task until configured |
-| World-state snapshot and event writer | Compiled against the local Playerbot AzerothCore checkout; not installed into the server or validated in-game |
-| Screenshot capture | Verified locally against a live WoW X11 client; accepts only the active, verified game window and decodes TrueColor/DirectColor channels; delivery through a second agent adapter remains unverified |
+| Shared request relay for an agent without database-file access | Available through fixed typed operations; both adapters can use the credential-free client |
+| Authenticated chat authority | Both adapters use a configurable exact sender allowlist; empty by default, so no character can start a task until configured |
+| World-state snapshot and event writer | Compiled and installed on the author's private Playerbot server; one-second snapshots and live events are being written; a clean public install is unverified |
+| Screenshot capture | Verified locally against a live WoW X11 client; accepts only the active, verified game window and decodes TrueColor/DirectColor channels; Codex attaches frames, and the Claude adapter can read the same validated image path; Claude visual delivery still needs a live check |
 | Ordinary-language requests converted into fully validated game actions | Design and initial playerbot action mappings are documented; the typed server dispatcher is not implemented |
-| End-to-end in-game validation | Not yet performed for this public snapshot |
+| End-to-end in-game validation | Shared telemetry and Codex visual capture were observed live; the Claude chat adapter is running but has not handled a fresh game message yet |
 
-This AzerothCore tree discovers module directories from their source layout and recursively collects source files during CMake configuration; it does not require a module-specific `CMakeLists.txt`. Reconfigure an existing build tree after adding the observer and writer `.cpp` files so CMake collects them. The observer has now compiled against the private Playerbot worktree; its binary has not been installed into the server, and live telemetry has not been verified. The `Object.h` compatibility change required by the observer is provided as a small patch under `patches/azerothcore/`.
+This AzerothCore tree discovers module directories from their source layout and recursively collects source files during CMake configuration; it does not require a module-specific `CMakeLists.txt`. Reconfigure an existing build tree after adding the observer and writer `.cpp` files so CMake collects them. On the author's private host, the observer was compiled from the local Playerbot worktree, installed, and observed writing fresh snapshots and events. That confirms one private deployment only; it is not a clean public install procedure. The `Object.h` compatibility change required by the observer is provided as a small patch under `patches/azerothcore/`.
 
 ## Design principles
 
@@ -50,7 +50,7 @@ This AzerothCore tree discovers module directories from their source layout and 
 
 ```text
 modules/mod-claude-bridge/   AzerothCore chat bridge and observer/writer source
-tools/wow-agent/             Codex adapter, shared-state readers, query and image helpers
+tools/wow-agent/             Claude and Codex adapters, shared-state readers, query and image helpers
 docs/design/                 Architecture and component specifications
 docs/implementation-notes/   Work plans and acceptance checklists
 patches/azerothcore/         Small optional core compatibility patch
@@ -63,6 +63,7 @@ assets/                      Project architecture illustration
 - Python 3.10 or newer for the agent helpers.
 - `mysql` client for direct static database lookups.
 - A local Codex CLI for the Codex adapter.
+- Claude Code CLI for the Claude chat adapter.
 - Optional X11 tools `xprop`, `xwininfo`, and `xwd`, plus Pillow, for window capture.
 
 Exact server APIs, build options, and Python dependencies vary by AzerothCore checkout. This snapshot has not been built against a clean public checkout; use it as source for review and integration work.
@@ -79,6 +80,15 @@ export WOW_AGENT_AUTHORIZED_PLAYERS=YourCharacter
 export WOW_AGENT_BOT_NAME=Codex
 export WOW_AGENT_OTHER_BOT=Claude
 ```
+
+Run a second adapter instance for Claude with `WOW_AGENT_BOT_NAME=Claude` and `WOW_AGENT_OTHER_BOT=Codex`. Both instances should receive the same explicit `WOW_AGENT_AUTHORIZED_PLAYERS` allowlist:
+
+```bash
+WOW_AGENT_BOT_NAME=Claude WOW_AGENT_OTHER_BOT=Codex \
+  python3 -I tools/wow-agent/claude-bridge.py --effort xhigh
+```
+
+The Claude bridge uses safe mode, read-only file tools, and a restricted command pattern for the typed world-query client; its in-game action directives are separately limited to a fixed allowlist.
 
 `WOW_AGENT_AUTHORIZED_PLAYERS` is intentionally empty by default. Use the exact in-game character names that are allowed to initiate tasks. Keep the telemetry directory private to the local account; it contains world state and may contain screenshots.
 
@@ -112,8 +122,8 @@ When Claude cannot read the server configuration, the Codex bridge can expose a 
 
 1. Reconfigure CMake so the generated build includes the new observer/writer sources, then compile against a supported AzerothCore checkout.
 2. Activate and validate the shared observer, event journal, and freshness reporting on a test server.
-3. Confirm the same snapshot and static-query results are consumable by both agent adapters.
-4. Verify the WoW-window screenshot path with an open client and matching live snapshot.
+3. Confirm the same snapshot and static-query results are consumable by both agent adapters; Codex's path is live, while Claude still needs a fresh-message check.
+4. Verify both agent image paths against an open client and matching live snapshot.
 5. Implement a typed, server-validated action dispatcher with correlated acknowledgements and observed outcomes.
 6. Run a documented in-game validation pass before calling a release stable.
 
