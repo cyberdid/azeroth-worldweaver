@@ -55,3 +55,9 @@
 - [x] Capture once and inspect the PNG dimensions and content; confirm no desktop or neighboring window is present.
 - [ ] Ask Codex and Claude independently to describe the same visible scene and compare their sequence/time references.
 - [ ] Minimize/close the client and confirm the helper reports unavailable rather than capturing another window.
+
+### Follow-up — 2026-10-28
+
+- Fixed a Codex CLI argument-order defect: `-i/--image` accepts multiple paths, so placing the prompt after it made the CLI wait for stdin and drop the prompt. The prompt now precedes the image arguments; a focused regression test covers that order.
+- Verified the installed `ask_codex()` path against a historical user-provided WoW screenshot. Codex and Claude independently described the same image and correctly treated it as historical.
+- A post-restart in-game message is still needed to verify that the live adapters receive and answer a fresh user request with matching screenshot metadata. The current desktop focus is the terminal, so the capture helper correctly reports the image unavailable.

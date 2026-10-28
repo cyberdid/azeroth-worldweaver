@@ -136,14 +136,16 @@ def ask_codex(model, effort, prompt, image_path=None):
     try:
         command = ['codex', 'exec', '-m', model, '-c', f'model_reasoning_effort={effort}', '-s', CODEX_SANDBOX,
                    '--skip-git-repo-check', '--ephemeral', '-o', out_path]
+        # Keep the prompt before --image: Codex accepts multiple image files after -i.
+        command.append(prompt)
         if image_path:
             command.extend(['-i', image_path])
-        command.append(prompt)
         subprocess.run(
             command,
             cwd=WORKDIR, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             timeout=600, check=True)
-        reply = open(out_path).read().strip()
+        with open(out_path, encoding='utf-8') as response_file:
+            reply = response_file.read().strip()
         half = len(reply) // 2
         if len(reply) % 2 == 0 and reply[:half] == reply[half:]:  # the CLI sometimes writes the last message twice
             reply = reply[:half]
