@@ -46,7 +46,7 @@
 - [x] Put the stable `screenshots/latest.json` path in the compact observation attached to Claude's incoming message; keep Codex's capture metadata in the same prompt and emit no standalone chat record.
 - [x] Add a Claude CLI chat adapter that reads the same state/event cursor and passes the sidecar to a read-only image-capable prompt; constrain shell access to the typed query client and game directives to an explicit allowlist.
 - [x] Keep the refresh on the shared five-second file-only cadence; action-milestone capture remains a later extension because the action dispatcher is not part of this phase.
-- [x] Do not attach an image whose snapshot sequence differs from the state under discussion without explicitly marking it stale.
+- [x] Include capture and prompt snapshot sequences and their delta; do not mark a recent frame stale solely because the one-second world snapshot advanced after image capture.
 
 ### Task 3: Live visual validation
 

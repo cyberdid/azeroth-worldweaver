@@ -315,8 +315,7 @@ def _capture_game_window(
             cached["current_group_id"] = current_group_id
             cached["current_snapshot_age_seconds"] = current_snapshot_age
             cached["checked_at"] = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime())
-            cached["stale"] = (previous.get("capture_snapshot_seq") != current_snapshot_seq
-                               or previous.get("capture_session_id") != current_session
+            cached["stale"] = (previous.get("capture_session_id") != current_session
                                or previous.get("capture_group_id") != current_group_id
                                or current_snapshot_seq is None or current_snapshot_age is None or age > 5.0
                                or current_snapshot_age > 5.0)
