@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import os
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -21,6 +22,9 @@ MAX_LIVE_SNAPSHOT_BYTES = 16 * 1024 * 1024
 MAX_LIVE_QUERY_ROWS = 50
 MAX_LIVE_QUERY_RESPONSE_BYTES = 32 * 1024
 MAX_LIVE_SNAPSHOT_AGE_SECONDS = 5.0
+MAX_LIVE_CACHED_SNAPSHOTS = 8
+MAX_LIVE_SNAPSHOT_CACHE_AGE_SECONDS = 30.0
+MAX_LIVE_SNAPSHOT_CACHE_BYTES = 64 * 1024 * 1024
 
 
 def submit(operation: str, args: dict[str, Any], telemetry_dir: Path = DEFAULT_TELEMETRY,
@@ -110,17 +114,149 @@ def _read_latest_live_snapshot(
     return snapshot, round(age_seconds, 3)
 
 
+def _live_snapshot_cache_dir(telemetry_dir: Path) -> Path | None:
+    try:
+        telemetry_root = telemetry_dir.resolve()
+        query_dir = telemetry_dir / ".world-query"
+        cache_dir = query_dir / "snapshots"
+        if query_dir.is_symlink() or cache_dir.is_symlink():
+            return None
+        query_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        query_dir.chmod(0o700)
+        cache_dir.mkdir(mode=0o700, exist_ok=True)
+        cache_dir.chmod(0o700)
+        resolved = cache_dir.resolve()
+        if telemetry_root not in resolved.parents:
+            return None
+        return cache_dir
+    except (OSError, RuntimeError):
+        return None
+
+
+def _snapshot_cache_path(
+    cache_dir: Path, group_id: str, session_id: str, snapshot_seq: int
+) -> Path | None:
+    if (not group_id.isascii() or not group_id.isdigit()
+            or not session_id or len(session_id) > 64
+            or not all(char.isdigit() or char == "-" for char in session_id)):
+        return None
+    path = cache_dir / f"snapshot-{group_id}-{session_id}-{snapshot_seq}.json"
+    try:
+        if path.is_symlink() or path.parent.resolve() != cache_dir.resolve():
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return path
+
+
+def _read_cached_live_snapshot(
+    telemetry_dir: Path, group_id: str, session_id: str, snapshot_seq: int
+) -> dict[str, Any] | None:
+    cache_dir = _live_snapshot_cache_dir(telemetry_dir)
+    path = _snapshot_cache_path(cache_dir, group_id, session_id, snapshot_seq) if cache_dir else None
+    if path is None:
+        return None
+    try:
+        stat = path.stat()
+        if time.time() - stat.st_mtime > MAX_LIVE_SNAPSHOT_CACHE_AGE_SECONDS:
+            path.unlink(missing_ok=True)
+            return None
+        if stat.st_size > MAX_LIVE_SNAPSHOT_BYTES:
+            return None
+        snapshot = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, RuntimeError, UnicodeError, json.JSONDecodeError):
+        return None
+    if (not isinstance(snapshot, dict) or snapshot.get("schema_version") != 1
+            or snapshot.get("group_id") != group_id
+            or snapshot.get("session_id") != session_id
+            or snapshot.get("snapshot_seq") != snapshot_seq):
+        return None
+    return snapshot
+
+
+def _prune_live_snapshot_cache(cache_dir: Path) -> None:
+    now = time.time()
+    cached: list[tuple[float, int, Path]] = []
+    for path in cache_dir.glob("snapshot-*.json"):
+        try:
+            if path.is_symlink() or path.parent.resolve() != cache_dir.resolve():
+                continue
+            stat = path.stat()
+            if now - stat.st_mtime > MAX_LIVE_SNAPSHOT_CACHE_AGE_SECONDS:
+                path.unlink(missing_ok=True)
+                continue
+            cached.append((stat.st_mtime, stat.st_size, path))
+        except (OSError, RuntimeError):
+            continue
+
+    cached.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    retained = 0
+    for index, (_mtime, size, path) in enumerate(cached):
+        if index >= MAX_LIVE_CACHED_SNAPSHOTS or retained + size > MAX_LIVE_SNAPSHOT_CACHE_BYTES:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        else:
+            retained += size
+
+
+def _cache_live_snapshot(telemetry_dir: Path, snapshot: dict[str, Any]) -> bool:
+    group_id = snapshot.get("group_id")
+    session_id = snapshot.get("session_id")
+    snapshot_seq = snapshot.get("snapshot_seq")
+    if (not isinstance(group_id, str) or not isinstance(session_id, str)
+            or not isinstance(snapshot_seq, int) or isinstance(snapshot_seq, bool)):
+        return False
+    cache_dir = _live_snapshot_cache_dir(telemetry_dir)
+    path = _snapshot_cache_path(cache_dir, group_id, session_id, snapshot_seq) if cache_dir else None
+    if path is None:
+        return False
+    payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(payload) > MAX_LIVE_SNAPSHOT_BYTES:
+        return False
+
+    temp_path: Path | None = None
+    try:
+        descriptor, temp_name = tempfile.mkstemp(prefix=".snapshot-", suffix=".tmp", dir=cache_dir)
+        temp_path = Path(temp_name)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temp_path.chmod(0o600)
+        os.replace(temp_path, path)
+        _prune_live_snapshot_cache(cache_dir)
+        return True
+    except OSError:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return False
+
+
+def _snapshot_age_seconds(snapshot: dict[str, Any]) -> float | None:
+    captured = snapshot.get("captured_at_unix_ms")
+    if not isinstance(captured, int) or isinstance(captured, bool):
+        return None
+    return round((time.time() * 1000 - captured) / 1000, 3)
+
+
 def query_live_nearby(args: dict[str, Any], telemetry_dir: Path) -> dict[str, Any]:
     """Filter and page the latest server-observed nearby objects without database access."""
     operation = "nearby"
     supported_args = {
         "group_id", "kind", "entry", "name", "map_id", "radius", "limit", "offset",
-        "line_of_sight", "attackable_only", "fishing_only",
+        "line_of_sight", "attackable_only", "fishing_only", "session_id", "snapshot_seq",
     }
 
-    def error(code: str) -> dict[str, Any]:
-        return {"operation": operation, "provenance": "none", "results": [],
-                "truncated": False, "error": code}
+    def error(code: str, **details: Any) -> dict[str, Any]:
+        result = {"operation": operation, "provenance": "none", "results": [],
+                  "truncated": False, "error": code}
+        result.update(details)
+        return result
 
     if set(args) - supported_args:
         return error("unsupported_filter")
@@ -152,6 +288,19 @@ def query_live_nearby(args: dict[str, Any], telemetry_dir: Path) -> dict[str, An
         except (TypeError, ValueError, OverflowError):
             return None
         return parsed if minimum <= parsed <= maximum else None
+
+    expected_session = args.get("session_id")
+    expected_seq_raw = args.get("snapshot_seq")
+    if (expected_session is None) != (expected_seq_raw is None):
+        return error("invalid_snapshot_pin")
+    expected_seq = None
+    if expected_session is not None:
+        expected_seq = integer_arg(expected_seq_raw, 1, 0xFFFFFFFFFFFFFFFF)
+        if (group_id is None or not isinstance(expected_session, str) or not expected_session
+                or len(expected_session) > 64
+                or not all(char.isdigit() or char == "-" for char in expected_session)
+                or expected_seq is None):
+            return error("invalid_snapshot_pin")
 
     entry_filter = None
     if args.get("entry") is not None:
@@ -185,7 +334,30 @@ def query_live_nearby(args: dict[str, Any], telemetry_dir: Path) -> dict[str, An
     if not isinstance(attackable_only, bool) or not isinstance(fishing_only, bool):
         return error("invalid_filter")
 
-    snapshot, age_seconds = _read_latest_live_snapshot(telemetry_dir, group_id)
+    cache_hit = False
+    if expected_session is not None and expected_seq is not None and group_id is not None:
+        snapshot = _read_cached_live_snapshot(telemetry_dir, group_id, expected_session, expected_seq)
+        if snapshot is not None:
+            cache_hit = True
+            age_seconds = _snapshot_age_seconds(snapshot)
+        else:
+            current, current_age = _read_latest_live_snapshot(telemetry_dir, group_id)
+            if current is None or current_age is None:
+                return error("live_snapshot_unavailable")
+            current_identity = {"session_id": current.get("session_id"),
+                                "snapshot_seq": current.get("snapshot_seq")}
+            if current_identity != {"session_id": expected_session, "snapshot_seq": expected_seq}:
+                return error("snapshot_changed", requested_snapshot={"session_id": expected_session,
+                             "snapshot_seq": expected_seq}, current_snapshot=current_identity)
+            snapshot, age_seconds = current, current_age
+            if not _cache_live_snapshot(telemetry_dir, snapshot):
+                return error("snapshot_cache_unavailable")
+    else:
+        snapshot, age_seconds = _read_latest_live_snapshot(telemetry_dir, group_id)
+        if snapshot is None or age_seconds is None:
+            return error("live_snapshot_unavailable")
+        if not _cache_live_snapshot(telemetry_dir, snapshot):
+            return error("snapshot_cache_unavailable")
     if snapshot is None or age_seconds is None:
         return error("live_snapshot_unavailable")
     nearby = snapshot.get("nearby")
@@ -238,6 +410,8 @@ def query_live_nearby(args: dict[str, Any], telemetry_dir: Path) -> dict[str, An
             "captured_at_unix_ms": snapshot.get("captured_at_unix_ms"),
             "age_seconds": age_seconds,
         },
+        "snapshot_pinned": True,
+        "snapshot_cache_hit": cache_hit,
         "nearby_server_limit": snapshot.get("nearby_limit"),
         "nearby_server_count": len(nearby),
         "nearby_server_truncated": snapshot.get("nearby_truncated"),
@@ -275,6 +449,8 @@ def main() -> int:
     parser.add_argument("--radius")
     parser.add_argument("--limit", default="20")
     parser.add_argument("--group-id")
+    parser.add_argument("--session-id")
+    parser.add_argument("--snapshot-seq")
     parser.add_argument("--offset")
     parser.add_argument("--line-of-sight", choices=("yes", "no"))
     parser.add_argument("--attackable-only", action="store_true")
@@ -288,11 +464,13 @@ def main() -> int:
         args["fishing_only"] = parsed.fishing_only
         result = query_live_nearby(args, parsed.telemetry_dir)
     else:
-        if (parsed.group_id is not None or parsed.offset is not None or parsed.line_of_sight is not None
+        if (parsed.group_id is not None or parsed.session_id is not None or parsed.snapshot_seq is not None
+                or parsed.offset is not None or parsed.line_of_sight is not None
                 or parsed.attackable_only or parsed.fishing_only):
             parser.error("live nearby filters are only valid with the nearby operation")
         args = {key: value for key, value in vars(parsed).items()
-                if key not in {"operation", "telemetry_dir", "group_id", "offset", "line_of_sight",
+                if key not in {"operation", "telemetry_dir", "group_id", "session_id", "snapshot_seq",
+                               "offset", "line_of_sight",
                                "attackable_only", "fishing_only"} and value is not None}
         result = submit(parsed.operation, args, parsed.telemetry_dir)
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))

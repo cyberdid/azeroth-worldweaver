@@ -94,6 +94,7 @@ operation to filter/page the live snapshot with `--kind`, `--entry`, `--name`, `
 `--line-of-sight`, `--attackable-only`, or `--fishing-only`; pass `--group-id` and page using `--limit` (1-50)
 and `--offset`. Follow `next_offset` exactly when present because pages can be shortened to fit the response-size limit.
 Verify its session, sequence, age, `clock_skew`, and `stale` flag.
+For multi-page results, pass the first page's `snapshot.session_id` and `snapshot.snapshot_seq` as `--session-id` and `--snapshot-seq` on every continuation. The helper keeps a private snapshot cache for up to 30 seconds. If it returns `snapshot_changed`, discard prior pages and restart at offset 0; if any page returns an error, do not merge it with earlier pages. Never merge pages from different sessions or sequences.
 Never claim absence if `nearby_server_truncated` is true. `orientation` records server facing in radians for group members and nearby objects; treat line of sight as a separate fact. In compact snapshots, fields in `snapshot.nearby_defaults` apply to each nearby
 record unless that record provides its own value. Missing from the list does not prove an object is absent
 or unreachable. `npc_roles` and raw NPC flags are service clues, not proof a specific quest is offered or an interaction
@@ -225,7 +226,7 @@ def handle(model, effort, channel, sender, text, history):
     world_context += ('\nWORLD ACCESS PATHS: shared read-only helper: python3 -I "'
                       + WORLD_QUERY_CLIENT + '" <operation> [typed options] --telemetry-dir "'
                       + WORLD_DIR + '". Static operations: creature, gameobject, spawns, quest, fishing, loot, item, spell. '
-                      'The nearby operation filters/pages live loaded objects from the current server snapshot. '
+                      'The nearby operation filters/pages a pinned live snapshot; continue with its --session-id and --snapshot-seq. '
                       'Use typed operations only; never issue raw SQL.')
     if screenshot.get('available'):
         screenshot['prompt_snapshot_seq'] = next_cursor.get('snapshot_seq')

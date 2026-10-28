@@ -127,3 +127,11 @@
 - Added `orientation` to each nearby live record; member orientation was already present. Both prompts explain that this is the server-facing angle in radians and remains separate from line of sight.
 - The optimization and orientation field compiled, were installed, and were deployed with a second server restart. `server info` confirms the new worldserver is ready; with zero players online, idle update p95/99/max are 3/4/5 ms, which does not measure observer cost.
 - The previous telemetry snapshot remains stale because no characters have reconnected. Validate the 500-object cap, orientation values, both agent readers, and dense-area tick cost after the group returns.
+
+### Follow-up: live group and pinned-page verification (2026-10-28)
+
+- The group reconnected. Fresh snapshot sequence 713 contains three group members and 109 nearby live records under the configured cap of 500. `nearby_truncated` is false; all 109 records include server orientation; dropped event, record, and snapshot counters are zero.
+- Worldserver `server info` reports one connected player, three characters in world, and update p95/99/max of 4/6/7 ms. This is a live baseline, not a dense-area stress measurement.
+- The shared screenshot sidecar reports an available, process-verified, non-stale window capture matched to sequence 705; its world snapshot was 0.56 seconds old at inspection. The image itself was not opened. A fresh model response consuming this image remains to be verified for both adapters.
+- Deployed `world_query_client.py` matches the reviewed worktree copy. Manual pagination check pinned a first page at sequence 613, allowed the live file to advance to 615, and returned the continuation from cached sequence 613 with `snapshot_cache_hit=true`.
+- Earlier notes that awaited reconnection are historical and superseded by this follow-up. Dense-area cost, fresh model responses, and a clean public install remain unverified.
