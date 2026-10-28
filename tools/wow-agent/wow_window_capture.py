@@ -165,6 +165,26 @@ def _decode_xwd(raw_path: str) -> Any:
         raise ValueError("XWD image declares an unknown pixel byte order")
     bytes_per_pixel = bits_per_pixel // 8
 
+    # Pillow's raw decoder handles the common X11 TrueColor byte layouts in C.
+    # Avoid a Python loop over every pixel for the large 24/32-bit WoW window.
+    raw_mode = None
+    if visual_class in (4, 5) and xoffset == 0:
+        masks = (red_mask, green_mask, blue_mask)
+        if bits_per_pixel == 24:
+            if masks == (0x00FF0000, 0x0000FF00, 0x000000FF):
+                raw_mode = "BGR" if byteorder == "little" else "RGB"
+            elif masks == (0x000000FF, 0x0000FF00, 0x00FF0000):
+                raw_mode = "RGB" if byteorder == "little" else "BGR"
+        elif bits_per_pixel == 32:
+            if masks == (0x00FF0000, 0x0000FF00, 0x000000FF):
+                raw_mode = "BGRX" if byteorder == "little" else "XRGB"
+            elif masks == (0x000000FF, 0x0000FF00, 0x00FF0000):
+                raw_mode = "RGBX" if byteorder == "little" else "XBGR"
+    if raw_mode is not None:
+        return Image.frombytes(
+            "RGB", (width, height), raw[image_offset:expected_end],
+            "raw", raw_mode, bytes_per_line, 1)
+
     def channel(pixel: int, mask: int) -> int:
         if not mask:
             return 0

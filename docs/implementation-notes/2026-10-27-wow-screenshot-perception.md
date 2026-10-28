@@ -60,4 +60,5 @@
 
 - Fixed a Codex CLI argument-order defect: `-i/--image` accepts multiple paths, so placing the prompt after it made the CLI wait for stdin and drop the prompt. The prompt now precedes the image arguments; a focused regression test covers that order.
 - Verified the installed `ask_codex()` path against a historical user-provided WoW screenshot. Codex and Claude independently described the same image and correctly treated it as historical.
-- A post-restart in-game message is still needed to verify that the live adapters receive and answer a fresh user request with matching screenshot metadata. The current desktop focus is the terminal, so the capture helper correctly reports the image unavailable.
+- Replaced the per-pixel Python loop for standard 24/32-bit XWD layouts with Pillow's raw decoder. On this machine, a live-sized 2560×1600 frame decoded in about 25 ms; PNG encoding remains the larger part of capture time.
+- A post-restart in-game message is still needed to verify that the live adapters receive and answer a fresh user request with matching screenshot metadata. When WoW is not the active window, the capture helper explicitly reports the image unavailable instead of reusing a stale frame.
