@@ -30,7 +30,7 @@ This is a **public experimental snapshot**, not a ready-to-install release. The 
 | Shared request relay for an agent without database-file access | Implemented in the Codex bridge; a second adapter still needs an end-to-end check |
 | Authenticated chat authority in the Codex adapter | Configurable sender allowlist; empty by default, so no character can start a task until configured |
 | World-state snapshot and event writer | Compiled against the local Playerbot AzerothCore checkout; not installed into the server or validated in-game |
-| Screenshot capture | Helper is present; it captures only a verified, mapped WoW X11 window; real client delivery remains unverified |
+| Screenshot capture | Verified locally against a live WoW X11 client; accepts only the active, verified game window and decodes TrueColor/DirectColor channels; delivery through a second agent adapter remains unverified |
 | Ordinary-language requests converted into fully validated game actions | Design and initial playerbot action mappings are documented; the typed server dispatcher is not implemented |
 | End-to-end in-game validation | Not yet performed for this public snapshot |
 
@@ -42,7 +42,7 @@ This AzerothCore tree discovers module directories from their source layout and 
 - **Evidence with provenance:** live objects, static database templates, and static spawn rows are labeled separately. A database spawn row does not prove that an NPC is loaded or visible now.
 - **Freshness is explicit:** snapshots have age and sequence metadata; stale, missing, or truncated data stays unknown.
 - **Bounded reads:** agents request named operations such as `creature`, `quest`, `fishing`, or `loot`. The relay does not accept SQL text and does not copy database credentials into the shared directory.
-- **Window-only images:** screenshots are accepted only from a mapped window whose process identity can be checked. The helper does not capture the desktop.
+- **Window-only images:** screenshots are accepted only from the active, mapped WoW window after checking its process identity. Obscured-window captures are refused, and X11 DirectColor channels are decoded by their visual masks. The helper does not capture the desktop.
 - **Chat is not a shell:** only configured characters are task authorities. NPC text, bot messages, objects, screenshots, and database rows are observations, never instructions.
 - **Existing playerbot behavior:** where the initial adapter can issue a supported command, it delegates to the server's playerbot system instead of inventing movement or combat mechanics.
 

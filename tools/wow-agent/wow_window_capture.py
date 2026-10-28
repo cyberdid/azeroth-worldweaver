@@ -41,6 +41,19 @@ def _window_ids() -> list[str]:
     return []
 
 
+def _active_window_id() -> str | None:
+    result = _run(["xprop", "-root", "_NET_ACTIVE_WINDOW"])
+    if result.returncode != 0:
+        return None
+    match = re.search(r"window id #\s*(0x[0-9a-fA-F]+|\d+)", result.stdout)
+    if not match:
+        return None
+    try:
+        return hex(int(match.group(1), 0))
+    except ValueError:
+        return None
+
+
 def _property(output: str, name: str) -> str:
     match = re.search(rf"^{re.escape(name)}(?:\([^)]*\))?\s*=\s*(.*)$", output, re.M)
     return match.group(1).strip() if match else ""
@@ -168,7 +181,7 @@ def _decode_xwd(raw_path: str) -> Any:
         for x in range(width):
             pixel_offset = row_offset + x * bytes_per_pixel
             value = int.from_bytes(source[pixel_offset:pixel_offset + bytes_per_pixel], byteorder)
-            if visual_class == 4 and (red_mask or green_mask or blue_mask):
+            if visual_class in (4, 5) and (red_mask or green_mask or blue_mask):
                 rgb = (channel(value, red_mask), channel(value, green_mask), channel(value, blue_mask))
             elif palette:
                 rgb = palette.get(value, (0, 0, 0))
@@ -263,6 +276,8 @@ def _capture_game_window(
         return unavailable(f"X11 window inspection failed: {exc}")
 
     window = candidates[0]
+    if _active_window_id() != window["window_id"].lower():
+        return unavailable("WoW window is not the active window; refusing an occluded capture")
     if window["hidden"]:
         return unavailable("WoW window is minimized or hidden")
     if window["map_state"] != "IsViewable":
