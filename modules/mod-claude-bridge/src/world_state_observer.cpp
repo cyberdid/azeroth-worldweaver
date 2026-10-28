@@ -743,6 +743,9 @@ namespace
         std::ostringstream out;
         out << std::fixed << std::setprecision(1);
         out << "{\"schema_version\":" << TELEMETRY_SCHEMA_VERSION
+            << ",\"observer_features\":{\"playerbot_strategy\":true,\"quest_objectives\":true"
+            << ",\"quest_dialog_by_member\":true,\"stable_entity_guids\":true,\"active_class_power\":true"
+            << "}"
             << ",\"session_id\":\"" << JsonEscape(sessionId)
             << "\",\"group_id\":\"" << context.key
             << "\",\"snapshot_seq\":" << snapshotSeq

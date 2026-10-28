@@ -25,6 +25,11 @@ MAX_LIVE_SNAPSHOT_AGE_SECONDS = 5.0
 MAX_LIVE_CACHED_SNAPSHOTS = 8
 MAX_LIVE_SNAPSHOT_CACHE_AGE_SECONDS = 30.0
 MAX_LIVE_SNAPSHOT_CACHE_BYTES = 64 * 1024 * 1024
+QUEST_DIALOG_STATUSES = {
+    "none", "unavailable", "low_level_available", "low_level_repeatable_reward",
+    "low_level_repeatable_available", "incomplete", "repeatable_reward", "repeatable_available",
+    "available", "reward_no_minimap_dot", "reward", "scripted_unknown", "unknown",
+}
 
 
 def submit(operation: str, args: dict[str, Any], telemetry_dir: Path = DEFAULT_TELEMETRY,
@@ -249,7 +254,8 @@ def query_live_nearby(args: dict[str, Any], telemetry_dir: Path) -> dict[str, An
     operation = "nearby"
     supported_args = {
         "group_id", "kind", "entry", "name", "map_id", "radius", "limit", "offset",
-        "line_of_sight", "attackable_only", "fishing_only", "session_id", "snapshot_seq",
+        "line_of_sight", "attackable_only", "fishing_only", "quest_status", "quest_member_guid",
+        "session_id", "snapshot_seq",
     }
 
     def error(code: str, **details: Any) -> dict[str, Any]:
@@ -333,6 +339,15 @@ def query_live_nearby(args: dict[str, Any], telemetry_dir: Path) -> dict[str, An
     fishing_only = args.get("fishing_only", False)
     if not isinstance(attackable_only, bool) or not isinstance(fishing_only, bool):
         return error("invalid_filter")
+    quest_status = args.get("quest_status")
+    if quest_status is not None and quest_status not in QUEST_DIALOG_STATUSES:
+        return error("invalid_quest_status")
+    quest_member_guid = args.get("quest_member_guid")
+    if quest_member_guid is not None and (
+        not isinstance(quest_member_guid, str) or not quest_member_guid.isascii()
+        or not quest_member_guid.isdigit() or len(quest_member_guid) > 20 or quest_status is None
+    ):
+        return error("invalid_quest_member_guid")
 
     cache_hit = False
     if expected_session is not None and expected_seq is not None and group_id is not None:
@@ -363,6 +378,10 @@ def query_live_nearby(args: dict[str, Any], telemetry_dir: Path) -> dict[str, An
     nearby = snapshot.get("nearby")
     if not isinstance(nearby, list):
         return error("nearby_list_unavailable")
+    if quest_status is not None:
+        features = snapshot.get("observer_features")
+        if not isinstance(features, dict) or features.get("quest_dialog_by_member") is not True:
+            return error("quest_status_unavailable", observer_features=features)
 
     matches: list[dict[str, Any]] = []
     for record in nearby:
@@ -391,6 +410,14 @@ def query_live_nearby(args: dict[str, Any], telemetry_dir: Path) -> dict[str, An
                              or not (record.get("fishing_node") is True
                                      or record.get("fishing_hole") is True)):
             continue
+        if quest_status is not None:
+            quest_dialog = record.get("quest_dialog_by_member")
+            if not isinstance(quest_dialog, list) or not any(
+                isinstance(status, dict) and status.get("status") == quest_status
+                and (quest_member_guid is None or status.get("member_guid") == quest_member_guid)
+                for status in quest_dialog
+            ):
+                continue
         matches.append(record)
 
     matches.sort(key=lambda record: float(record["distance"]))
@@ -417,6 +444,8 @@ def query_live_nearby(args: dict[str, Any], telemetry_dir: Path) -> dict[str, An
         "nearby_server_truncated": snapshot.get("nearby_truncated"),
         "matching_count": len(matches),
         "offset": offset,
+        "quest_status_filter": quest_status,
+        "quest_member_guid_filter": quest_member_guid,
         "returned_count": len(page),
         "truncated": offset + len(page) < len(matches),
         "next_offset": offset + len(page) if offset + len(page) < len(matches) else None,
@@ -455,6 +484,8 @@ def main() -> int:
     parser.add_argument("--line-of-sight", choices=("yes", "no"))
     parser.add_argument("--attackable-only", action="store_true")
     parser.add_argument("--fishing-only", action="store_true")
+    parser.add_argument("--quest-status", choices=sorted(QUEST_DIALOG_STATUSES))
+    parser.add_argument("--quest-member-guid")
     parser.add_argument("--telemetry-dir", type=Path, default=DEFAULT_TELEMETRY)
     parsed = parser.parse_args()
     if parsed.operation == "nearby":
@@ -466,12 +497,13 @@ def main() -> int:
     else:
         if (parsed.group_id is not None or parsed.session_id is not None or parsed.snapshot_seq is not None
                 or parsed.offset is not None or parsed.line_of_sight is not None
-                or parsed.attackable_only or parsed.fishing_only):
+                or parsed.attackable_only or parsed.fishing_only
+                or parsed.quest_status is not None or parsed.quest_member_guid is not None):
             parser.error("live nearby filters are only valid with the nearby operation")
         args = {key: value for key, value in vars(parsed).items()
                 if key not in {"operation", "telemetry_dir", "group_id", "session_id", "snapshot_seq",
                                "offset", "line_of_sight",
-                               "attackable_only", "fishing_only"} and value is not None}
+                               "attackable_only", "fishing_only", "quest_status", "quest_member_guid"} and value is not None}
         result = submit(parsed.operation, args, parsed.telemetry_dir)
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     return 1 if "error" in result else 0
