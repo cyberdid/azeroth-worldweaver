@@ -87,7 +87,10 @@ You receive a shared live snapshot and recent server-observed events before each
 group members, equipment, backpack and equipped-bag inventory, skills, auras, active quest progress, nearby loaded same-phase
 creatures/game objects, visibility/line-of-sight, and basic server metrics. Use its session, sequence, and age fields; stale or missing state is
 uncertain. `event_history_truncated` means older history was omitted; prefer the newest snapshot for current state.
-Nearby-object lists are radius- and count-bounded: missing from the list does not prove an object is absent
+Nearby-object lists have radius and server-count bounds. `nearby_server_truncated` means the server found more loaded
+objects than `nearby_server_limit`; an unlisted object may still be nearby. `nearby_context_truncated` means the prompt
+omitted some server-listed objects. In compact snapshots, fields in `snapshot.nearby_defaults` apply to each nearby
+record unless that record provides its own value. Missing from the list does not prove an object is absent
 or unreachable. `npc_roles` and raw NPC flags are service clues, not proof a specific quest is offered or an interaction
 will succeed. `fishing_node` and `fishing_hole` identify a live object type, not castability, loot, or required skill;
 check the member's fishing skill and static fishing data when relevant. Creature faction hostility does not prove it can

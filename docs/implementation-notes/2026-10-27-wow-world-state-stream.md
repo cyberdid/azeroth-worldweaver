@@ -97,3 +97,11 @@
 - Fresh or badly lagging cursors now select the newest bounded event tail, avoiding repeated prompts that replay old journal entries while newer activity remains unseen.
 - Context exposes `event_history_truncated` when the journal begins after sequence 1, the reader skips older unseen entries to catch up, or prompt-size compaction removes events. Both bridge prompts direct agents to use the latest snapshot for current state when this flag is set.
 - Focused and full unit suites pass for the reader change. Both live bridge consumers need a restart to load it; actual post-deploy in-game chat remains to be observed.
+
+### Follow-up: preserve the full nearby list in agent context
+
+- The server snapshot now reports its object cap and sets `nearby_truncated` only after finding an additional matching live object beyond that cap. Reaching the cap alone is not treated as proof that an object was omitted.
+- Agent context raises its bounded character budget and moves repeated provenance, map, instance, and phase values into `snapshot.nearby_defaults` when those values are shared by all listed objects. This is lossless; later fallback compaction still records `nearby_context_truncated` if objects must be removed.
+- Both prompts distinguish server-side omissions from prompt-size omissions and inherit compacted record defaults explicitly.
+- `make -j20 worldserver` succeeded, the matching binary was installed, and the private server restarted. Both bridges restarted with the updated context reader. With the last live 40-object snapshot, both generated contexts include all 40 records at 34,974 characters and correctly mark the snapshot stale.
+- Runtime verification of `nearby_limit`/`nearby_truncated` remains pending because the server currently reports zero online players; confirm those fields in a fresh group snapshot after the characters reconnect, preferably in a dense area.

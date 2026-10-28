@@ -596,6 +596,7 @@ namespace
         float radius;
         uint32 limit;
         std::vector<NearbyObject>& nearby;
+        bool& truncated;
 
         void operator()(WorldObject* object) const
         {
@@ -628,6 +629,7 @@ namespace
                 nearby.push_back({distance, object, member});
             else
             {
+                truncated = true;
                 auto furthest = std::max_element(nearby.begin(), nearby.end(), [](NearbyObject const& left, NearbyObject const& right)
                 {
                     return left.distance < right.distance;
@@ -673,6 +675,7 @@ namespace
         bool firstMember = true;
         std::vector<NearbyObject> nearby;
         nearby.reserve(maxNearbyObjects);
+        bool nearbyTruncated = false;
         for (Player* member : context.members)
         {
             if (!member || !member->IsInWorld())
@@ -873,7 +876,7 @@ namespace
             if (map)
             {
                 float const radius = std::min(member->GetVisibilityRange(), configuredRadius);
-                NearbyObjectCollector collector{member, map, radius, maxNearbyObjects, nearby};
+                NearbyObjectCollector collector{member, map, radius, maxNearbyObjects, nearby, nearbyTruncated};
                 uint32 const mapTypeMask = GRID_MAP_TYPE_MASK_CREATURE | GRID_MAP_TYPE_MASK_GAMEOBJECT;
                 Acore::WorldObjectWorker<NearbyObjectCollector> searcher(member, collector, mapTypeMask);
                 Cell::VisitObjects(member, searcher, radius);
@@ -1030,7 +1033,9 @@ namespace
                     << " fishing_hole=" << (gameObject->GetGoType() == GAMEOBJECT_TYPE_FISHINGHOLE ? "yes" : "no")
                     << " loot_state=" << unsigned(gameObject->getLootState());
         }
-        out << "]}";
+        // Report whether at least one matching loaded object was omitted by the cap.
+        out << "],\"nearby_limit\":" << maxNearbyObjects
+            << ",\"nearby_truncated\":" << (nearbyTruncated ? "true" : "false") << '}';
         compact << "\nRecent world events:";
         GroupSequence const& sequence = groupSequences[context.key];
         for (std::string const& summary : sequence.recentEventSummaries)
