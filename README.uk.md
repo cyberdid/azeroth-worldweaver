@@ -1,6 +1,8 @@
 <div align="center">
 
-<img src="assets/worldweaver-hero.svg" alt="Azeroth Worldweaver: Claude і Codex разом сприймають живий світ Azeroth" width="100%">
+<img src="assets/worldweaver-hero.png" alt="Двоє компаньйонів — шаман і мисливець із синім вітряним змієм — дивляться на фентезійні острови на заході сонця" width="100%">
+
+# ✦ Azeroth Worldweaver
 
 [![Експеримент](https://img.shields.io/badge/стан-експеримент-c99c4b?style=for-the-badge)](#стан-проєкту)
 [![WoW](https://img.shields.io/badge/світ-WotLK%203.3.5a-49689b?style=for-the-badge)](#що-потрібно)

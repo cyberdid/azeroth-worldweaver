@@ -1,6 +1,8 @@
 <div align="center">
 
-<img src="assets/worldweaver-hero.svg" alt="Azeroth Worldweaver: Claude and Codex share a living Azeroth world through a luminous bridge" width="100%">
+<img src="assets/worldweaver-hero.png" alt="Two AI companions, a shaman and a dwarf hunter with a blue wind serpent, overlooking a sunset-lit floating-island fantasy landscape" width="100%">
+
+# ✦ Azeroth Worldweaver
 
 [![Experimental](https://img.shields.io/badge/status-experimental-c99c4b?style=for-the-badge)](#status)
 [![WoW](https://img.shields.io/badge/world-WotLK%203.3.5a-49689b?style=for-the-badge)](#requirements)
