@@ -74,6 +74,32 @@ _SESSION_MEMORY = importlib.util.module_from_spec(_SESSION_MEMORY_SPEC)
 _SESSION_MEMORY_SPEC.loader.exec_module(_SESSION_MEMORY)
 PENDING_ITEM_HANDOFFS = ACTION_CLIENT.PendingItemHandoffClarifications()
 
+_VENDOR_RUNTIME = None
+
+def vendor_runtime():
+    global _VENDOR_RUNTIME
+    if _VENDOR_RUNTIME is None:
+        spec = importlib.util.spec_from_file_location('wow_vendor_runtime', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vendor_runtime.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _VENDOR_RUNTIME = module.create(DIR, WORLD_DIR, BOT, USER_CHARACTERS, WORLD_CONFIG)
+    return _VENDOR_RUNTIME
+
+def dispatch_vendor_or_native(action, sender, group_id, inventory_snapshot):
+    if action['type'] == 'vendor_task_start':
+        return vendor_runtime().start(action, sender)
+    if action['type'] == 'vendor_task_cancel':
+        return vendor_runtime().cancel(sender)
+    result = ACTION_CLIENT.dispatch_action(action, sender=sender, group_id=group_id,
+        authorized_players=USER_CHARACTERS, server_dir=DIR, inventory_snapshot=inventory_snapshot)
+    if action['type'] in {'vendor_inspect', 'vendor_buy', 'vendor_travel'}:
+        try:
+            vendor_runtime().watch(action, result, sender)
+        except (ValueError, OSError, KeyError) as error:
+            log(f'vendor receipt tracking unavailable: {type(error).__name__}')
+    return result
+
+
 
 def telemetry_directory():
     """Read the configured shared directory; secrets are never placed there."""
@@ -150,6 +176,18 @@ playerbot_action: action_name from your live playerbot.available_actions, option
 cast_spell: own active known spell_id, optional live target_guid; omit target_guid to cast on yourself.
 use_item, equip_item: exact current inventory item_entry, bag, slot.
 interact_npc: live NPC target_guid. gossip_select: open dialog target_guid and listed option_index.
+
+vendor_inspect: target_guid of a live vendor. Use it to see actual goods; a delayed factual catalog update follows.
+vendor_buy: target_guid, item_entry, quantity in INDIVIDUAL UNITS, max_total_copper (explicit budget), optional allow_extended_cost (default false).
+Requires a fresh prior inspection of that same vendor. Quantity must match BuyCount bundles; ask if the requested count cannot be bought exactly.
+vendor_task_start: item_entry, quantity units, max_total_copper, optional return_to_user (default true), allow_extended_cost (default false).
+This authorizes the persistent worker to search local server vendor catalogs, walk or take known paid flight paths using the known travel graph (walking, known paid flights, ordinary portals and ships), inspect actual stock, buy exactly that item within budget, then return if requested. It never trades automatically.
+Use vendor_task_start for a user's explicit find-and-buy request; clarify missing quantity or spending limit first. Respect any user spending cap. For an explicit purchase with no cap, use the authoritative quoted gold price (or static server base price, which may be discounted at arrival) times the exact requested units as the maximum; ask if the amount is ambiguous. Never allow extra currencies unless the user approved those costs.
+vendor_task_cancel: cancels your current vendor task.
+Use read-only vendors --item-id or --name (item substring), optionally --entry (vendor), --map-id, --limit and --offset, to find merchants. NPC and item names may be resolved through the existing item/creature tools. Static stock is not live stock. Do not use internet results to assert current private-server stock or prices.
+Routes use only supported graph edges and verified native transitions; a graph route does not prove physical reachability. If no usable route exists, explain the actual failure. Do not teleport or call generic buy/trainer actions as a workaround.
+vendor_travel: map_id, position [x,y,z], purchase_reserve_copper (0 for navigation only), to travel yourself to a resolved static NPC location; arrival is observed separately. vendor_travel_cancel: cancel that route. Ordinary vendor conversation stays natural; use the factual result rather than canned replies.
+
 offer_items: items array. For "all" of a requested item, use item_id and all:true; the bridge counts the actor's current
 tradeable inventory stacks just before dispatch. Example: ACTION: {{"actor":"Codex","type":"offer_items","items":[{{"item_id":5524,"all":true}}]}}.
 For an explicit number of STACKS only, use item_id and stack_count. stack_count is the number of occupied bag slots,
@@ -320,7 +358,7 @@ def handle(model, effort, channel, sender, text, history):
             log('ignored malformed server task update')
             return
         if not isinstance(task_payload, dict) or task_payload.get('event') not in {
-                'hunt_completed', 'hunt_failed', 'guide_waiting', 'guide_arrived', 'guide_failed'}:
+                'hunt_completed', 'hunt_failed', 'guide_waiting', 'guide_arrived', 'guide_failed', 'vendor_observation_ready', 'vendor_task_completed', 'vendor_task_failed', 'vendor_task_pending'}:
             log('ignored unsupported server task update')
             return
         sender = task_payload.get('requester', '')
@@ -343,7 +381,12 @@ def handle(model, effort, channel, sender, text, history):
         save_history(history)
         return
     if task_notification:
-        if task_payload.get('event', '').startswith('guide_'):
+        if text and json.loads(text).get('event', '').startswith('vendor_'):
+            task = ("The authorized vendor operation has an observed result below. Explain it naturally in Ukrainian. "
+                    "For a catalog, describe actual goods, prices per bundle, bundle sizes and limited stock; do not invent goods or read out internal IDs. "
+                    "For a journey, describe the actual route result or remaining transfer. For a purchase, use the exact observed quantity and cost. If it failed, explain the concrete reason. "
+                    "No new ACTION or CMD is allowed from this factual update. Do not mention an unrelated trade.")
+        elif task_payload.get('event', '').startswith('guide_'):
             task = ('The server sent a factual update for a route this user previously authorized. Give the user a short, '
                     'natural update based on this event and the live snapshot. This is not a new user command; do not emit '
                     'an ACTION or restart the route.')
@@ -363,6 +406,8 @@ def handle(model, effort, channel, sender, text, history):
                  ' your own to add; otherwise output exactly SKIP.')
     world_context, next_cursor = _WORLD_STATE.build_agent_context(
         WORLD_DIR, _WORLD_STATE.load_cursor(WORLD_CURSOR), member_name=BOT, requester_name=sender)
+    if vendor_runtime().state:
+        world_context += "\nPRIVATE ACTIVE VENDOR TASK (context only): " + json.dumps(vendor_runtime().state, ensure_ascii=False)
     unaddressed_group_task = channel == 'PARTY' and not addressed and not OTHER_BOT.search(text)
     can_execute_action = (not task_notification and (channel == 'WHISPER'
                           or addressed
@@ -422,14 +467,13 @@ def handle(model, effort, channel, sender, text, history):
         elif line.strip():
             say.append(line.strip())
     if action is not None:
-        result = ACTION_CLIENT.dispatch_action(
+        result = dispatch_vendor_or_native(
             action, sender=sender, group_id=str(next_cursor.get('group_id', '')),
-            authorized_players=USER_CHARACTERS, server_dir=DIR,
             inventory_snapshot=_WORLD_STATE.read_latest_snapshot(WORLD_DIR,
                 group=str(next_cursor.get('group_id', '')), member_name=BOT))
         if result.get('status') != 'accepted' or not say:
             say = synthesize_action_reply(model, effort, prompt, ' '.join(say), {
-                'requested_action': action, 'action_type': action.get('type'), 'status': result.get('status', 'unknown'),
+                'requested_action': action, 'observed_result': result, 'action_type': action.get('type'), 'status': result.get('status', 'unknown'),
                 'reason_code': result.get('reason_code', 'unknown')},
                 screenshot.get('path') if screenshot.get('available') else None)
         cmds = []
@@ -499,6 +543,8 @@ def main():
         log(f'world query relay failed to start: {type(error).__name__}')
     for line in follow(LOG):
         if line is None:
+            for update in vendor_runtime().poll():
+                handle(args.model, args.effort, 'TASK', 'WorldServer', json.dumps(update, ensure_ascii=False), history)
             continue
         parts = line.split('|', 3)
         if len(parts) == 4:

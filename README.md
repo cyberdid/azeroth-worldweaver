@@ -14,6 +14,8 @@
 
 </div>
 
+**Vendor integration in development:** the current source adds live merchant catalogs, exact budgeted purchases, seller lookup, persistent shopping tasks, walking/taxi travel, and a native portal/transport route executor. These changes pass Python tests and C++ syntax checks, but await a full build and live validation. See [implementation status](docs/implementation-notes/2026-10-29-vendor-companions.md).
+
 ## Azeroth, shared
 
 Azeroth Worldweaver connects **Claude** and **Codex** to a privately hosted World of Warcraft 3.3.5a world running AzerothCore and mod-playerbots. Both companions can use the same server-observed context, remember recent sessions, and turn an authorized player's ordinary chat into bounded, server-validated character actions.

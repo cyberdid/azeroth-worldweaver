@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import subprocess
 import time
@@ -26,6 +27,12 @@ ALLOWED_ACTIONS = frozenset({
     "cast_spell",
     "use_item",
     "equip_item",
+    "vendor_travel",
+    "vendor_travel_cancel",
+    "vendor_inspect",
+    "vendor_buy",
+    "vendor_task_start",
+    "vendor_task_cancel",
     "interact_npc",
     "gossip_select",
     "offer_items",
@@ -37,6 +44,12 @@ ALLOWED_ACTIONS = frozenset({
     "playerbot_action",
 })
 ACTION_REQUIRED_FIELDS = {
+    "vendor_travel": frozenset({"map_id", "position", "purchase_reserve_copper"}),
+    "vendor_travel_cancel": frozenset(),
+    "vendor_inspect": frozenset({"target_guid"}),
+    "vendor_buy": frozenset({"target_guid", "item_entry", "quantity", "max_total_copper"}),
+    "vendor_task_start": frozenset({"item_entry", "quantity", "max_total_copper"}),
+    "vendor_task_cancel": frozenset(),
     "follow": frozenset(),
     "stay": frozenset(),
     "attack_master_target": frozenset(),
@@ -60,6 +73,8 @@ ACTION_REQUIRED_FIELDS = {
     "playerbot_action": frozenset({"action_name"}),
 }
 ACTION_OPTIONAL_FIELDS = {
+    "vendor_buy": frozenset({"allow_extended_cost"}),
+    "vendor_task_start": frozenset({"allow_extended_cost", "return_to_user"}),
     "cast_spell": frozenset({"target_guid"}),
     "hunt_start": frozenset({"creature_entry", "creature_entries", "area_id", "collect_loot"}),
     "guide_start": frozenset({"creature_entry", "creature_entries", "area_id"}),
@@ -335,6 +350,29 @@ def _encode_playerbot_action(action: dict[str, Any]) -> str:
     return "p" + name.encode("ascii").hex() + "." + qualifier.encode("utf-8").hex()
 
 
+def _encode_vendor_travel(action: dict[str, Any]) -> str:
+    for key, maximum in (("map_id",65535),("purchase_reserve_copper",0xFFFFFFFF)):
+        value=action.get(key)
+        if not isinstance(value,int) or isinstance(value,bool) or not 0<=value<=maximum:
+            raise ValueError("invalid_vendor_"+key)
+    position=action.get("position")
+    if not isinstance(position,list) or len(position)!=3 or any(
+            not isinstance(v,(int,float)) or isinstance(v,bool) or not math.isfinite(v) or abs(v)>100000 for v in position):
+        raise ValueError("invalid_vendor_position")
+    return f"r:{action['map_id']}:{':'.join(format(v,'.6f') for v in position)}:{action['purchase_reserve_copper']}"
+
+
+def _encode_vendor_purchase(action: dict[str, Any]) -> str:
+    for key, maximum in (("item_entry", 0xFFFFFFFF), ("quantity", 0xFFFF), ("max_total_copper", 0xFFFFFFFF)):
+        value = action.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or not (0 if key == "max_total_copper" else 1) <= value <= maximum:
+            raise ValueError("invalid_vendor_" + key)
+    for key in ("allow_extended_cost", "return_to_user"):
+        if key in action and not isinstance(action[key], bool):
+            raise ValueError("invalid_vendor_" + key)
+    return f"v:{action['item_entry']}:{action['quantity']}:{action['max_total_copper']}:{int(action.get('allow_extended_cost', False))}"
+
+
 def parse_action_response(
     response: str,
     *,
@@ -431,6 +469,16 @@ def parse_action_response(
                 "invalid_creature_entry", "invalid_creature_entries", "duplicate_creature_entry",
                 "invalid_map_id", "invalid_zone_id", "invalid_area_id",
             } else "invalid_guide_request"
+    if value["type"] == "vendor_travel":
+        try:
+            _encode_vendor_travel(value)
+        except ValueError as error:
+            return reply, None, str(error)
+    if value["type"] in {"vendor_buy", "vendor_task_start"}:
+        try:
+            _encode_vendor_purchase(value)
+        except ValueError as error:
+            return reply, None, str(error)
     if value["type"] == "playerbot_action":
         try:
             _encode_playerbot_action(value)
@@ -484,7 +532,13 @@ def build_action_command(
                                      or isinstance(option_index, bool)
                                      or not 0 <= option_index <= 255):
         raise ValueError("invalid_option_index")
-    if action_type == "offer_items":
+    if action_type in {"vendor_task_start", "vendor_task_cancel"}:
+        raise ValueError("bridge_local_action")
+    if action_type == "vendor_travel":
+        task_token = _encode_vendor_travel(action)
+    elif action_type == "vendor_buy":
+        task_token = _encode_vendor_purchase(action)
+    elif action_type == "offer_items":
         item_offer_token = _encode_item_offers(action["items"])
     elif action_type in {"use_item", "equip_item"}:
         item_offer_token = _encode_item_location(action)

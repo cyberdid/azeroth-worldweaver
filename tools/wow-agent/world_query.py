@@ -24,6 +24,7 @@ MAX_REFERENCE_DEPTH = 3
 MAX_REFERENCE_IDS_PER_QUERY = 64
 MAX_REFERENCE_ROWS_PER_QUERY = 100
 MAX_EXPANDED_REFERENCE_ROWS = 40
+MAX_VENDOR_REFERENCE_DEPTH = 8
 
 
 class QueryInputError(ValueError):
@@ -218,6 +219,8 @@ def _identifier(value: Any, name: str, maximum: int = 0xFFFFFFFF, allow_zero: bo
 
 
 def _limit(args: dict[str, Any]) -> int:
+    if isinstance(args.get("limit"), bool):
+        raise QueryInputError("invalid_limit")
     try:
         value = int(args.get("limit", 20))
     except (TypeError, ValueError, OverflowError) as error:
@@ -659,6 +662,110 @@ def _fishing(args: dict[str, Any], limit: int, config_path: str) -> tuple[list[d
     return catches[:limit] + holes[:limit], truncated
 
 
+def _vendors(args: dict[str, Any], limit: int, config_path: str) -> dict[str, Any]:
+    """Search configured item offers and walk negative-item references towards vendors.
+
+    References supply the leaf row's stock/cost, just as LoadReferenceVendor does.
+    SQL recursion is depth bounded and stops on cycles; neither condition is hidden.
+    These are catalog/spawn records, never an observation of current merchant stock.
+    """
+    if set(args) - {"item_id", "name", "entry", "map_id", "limit", "offset"}:
+        raise QueryInputError("unsupported_filter")
+    limit = _identifier(args.get("limit", 20), "limit", maximum=MAX_ROWS)
+    if (args.get("item_id") is None) == (args.get("name") is None):
+        raise QueryInputError("vendors_requires_item_id_or_name")
+    if args.get("item_id") is not None:
+        item_filter = "it.entry = ?"
+        item_parameter = _identifier(args["item_id"], "item_id")
+    else:
+        item_filter = "LOCATE(?, it.name) > 0"
+        item_parameter = _name(args)
+    offset = _identifier(args.get("offset", 0), "offset", maximum=100000, allow_zero=True)
+    filters = ["vi.reference_cycle = 0"]
+    filter_parameters: list[Any] = []
+    if args.get("entry") is not None:
+        filters.append("ct.entry = ?")
+        filter_parameters.append(_identifier(args["entry"], "entry"))
+    if args.get("map_id") is not None:
+        filters.append("s.map = ?")
+        filter_parameters.append(_identifier(args["map_id"], "map_id", maximum=65535, allow_zero=True))
+
+    schema_rows = _mysql_rows(
+        "SELECT JSON_OBJECT('column', COLUMN_NAME) FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? "
+        "AND COLUMN_NAME IN (?, ?, ?, ?, ?, ?)",
+        ["creature", "id", "id1", "id2", "id3", "zoneId", "areaId"], config_path)
+    columns = {row.get("column") for row in schema_rows}
+    entry_columns = [column for column in ("id1", "id2", "id3") if column in columns]
+    if not entry_columns and "id" in columns:
+        entry_columns = ["id"]
+    if not entry_columns:
+        raise QueryUnavailable("spawn_schema_unavailable")
+    spawn_join = " OR ".join(f"s.{column} = ct.entry" for column in entry_columns)
+    zone_column = "s.zoneId" if "zoneId" in columns else "NULL"
+    area_column = "s.areaId" if "areaId" in columns else "NULL"
+
+    # Only trusted schema column names and a constant depth enter SQL text.
+    # Item names and all caller-supplied filters remain prepared parameters.
+    cte = f"""WITH RECURSIVE vendor_items AS (
+        SELECT nv.entry AS vendor_entry, nv.entry AS catalog_entry,
+            nv.item AS item_id, nv.maxcount, nv.incrtime, nv.ExtendedCost,
+            0 AS reference_depth,
+            CAST(CONCAT('/', nv.entry, '/') AS CHAR(2048)) AS reference_path,
+            0 AS reference_cycle
+        FROM npc_vendor nv JOIN item_template it ON it.entry = nv.item
+        WHERE {item_filter}
+        UNION ALL
+        SELECT parent.entry, vi.catalog_entry, vi.item_id, vi.maxcount, vi.incrtime, vi.ExtendedCost,
+            vi.reference_depth + 1, CONCAT(vi.reference_path, parent.entry, '/'),
+            LOCATE(CONCAT('/', parent.entry, '/'), vi.reference_path) > 0
+        FROM vendor_items vi JOIN npc_vendor parent ON parent.item = -CAST(vi.vendor_entry AS SIGNED)
+        WHERE vi.reference_depth < {MAX_VENDOR_REFERENCE_DEPTH} AND vi.reference_cycle = 0
+    ) """
+    diagnostics = _mysql_rows(cte + f"""SELECT JSON_OBJECT(
+        'cycle_detected', COALESCE(MAX(vi.reference_cycle), 0),
+        'depth_limit_reached', COALESCE(MAX(vi.reference_depth = {MAX_VENDOR_REFERENCE_DEPTH}
+            AND vi.reference_cycle = 0 AND EXISTS (
+                SELECT 1 FROM npc_vendor parent WHERE parent.item = -CAST(vi.vendor_entry AS SIGNED))), 0)
+        ) FROM vendor_items vi""", [item_parameter], config_path)
+    if len(diagnostics) != 1:
+        raise QueryUnavailable("query_result_invalid")
+    cycle = bool(diagnostics[0].get("cycle_detected"))
+    depth_limit = bool(diagnostics[0].get("depth_limit_reached"))
+
+    rows = _mysql_rows(cte + f"""SELECT record FROM (SELECT DISTINCT JSON_OBJECT(
+        'item_id', it.entry, 'item_name', it.name, 'buy_count', it.BuyCount,
+        'base_buy_price_copper', it.BuyPrice,
+        'maxcount', vi.maxcount, 'incrtime_seconds', vi.incrtime, 'extended_cost_id', vi.ExtendedCost,
+        'catalog_entry', vi.catalog_entry,
+        'vendor_entry', ct.entry, 'vendor_name', ct.name, 'npc_flags', ct.npcflag,
+        'spawn_guid', s.guid, 'map_id', s.map, 'zone_id', {zone_column}, 'area_id', {area_column},
+        'position', CASE WHEN s.guid IS NULL THEN NULL
+            ELSE JSON_ARRAY(s.position_x, s.position_y, s.position_z) END,
+        'orientation', s.orientation, 'phase_mask', s.phaseMask, 'spawn_mask', s.spawnMask,
+        'provenance', 'static_spawn', 'loaded', 'unknown', 'current_stock', 'unknown'
+    ) AS record, ct.entry AS sort_vendor, it.entry AS sort_item,
+        vi.ExtendedCost AS sort_cost, vi.maxcount AS sort_count, vi.incrtime AS sort_time,
+        vi.catalog_entry AS sort_catalog, s.guid AS sort_spawn
+    FROM vendor_items vi JOIN creature_template ct ON ct.entry = vi.vendor_entry
+      JOIN item_template it ON it.entry = vi.item_id
+      LEFT JOIN creature s ON ({spawn_join})
+    WHERE {' AND '.join(filters)}
+    ) offers
+    ORDER BY sort_vendor, sort_item, sort_cost, sort_count, sort_time, sort_catalog, sort_spawn
+    LIMIT ? OFFSET ?""", [item_parameter, *filter_parameters, limit + 1, offset], config_path)
+    more = len(rows) > limit
+    page = rows[:limit]
+    return {"operation": "vendors", "provenance": "static_spawn", "catalog_source": "npc_vendor",
+            "stock_scope": "configured_catalog; current stock, availability and player eligibility unknown",
+            "price_scope": "item_template base price; discounts and extended-cost requirements not evaluated",
+            "reference_cycle_detected": cycle, "reference_depth_limit_reached": depth_limit,
+            "reference_resolution_truncated": cycle or depth_limit,
+            "offset": offset, "returned_count": len(page),
+            "next_offset": offset + len(page) if more else None,
+            "results": page, "truncated": more or cycle or depth_limit}
+
+
 def _bounded_result(result: dict[str, Any]) -> dict[str, Any]:
     result["truncated"] = bool(result.get("truncated", False))
     while len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > MAX_OUTPUT_BYTES:
@@ -669,20 +776,25 @@ def _bounded_result(result: dict[str, Any]) -> dict[str, Any]:
             break
         rows.pop()
         result["truncated"] = True
+        if result.get("operation") == "vendors":
+            result["returned_count"] = len(rows)
+            result["next_offset"] = result["offset"] + len(rows)
     return result
 
 
 def run_query(operation: str, args: dict[str, Any], config_path: str = DEFAULT_CONFIG) -> dict[str, Any]:
-    provenance = "static_spawn" if operation == "spawns" else "static_template"
+    provenance = "static_spawn" if operation in {"spawns", "vendors"} else "static_template"
     if operation == "fishing":
         provenance = "mixed_static"
-    if operation not in {"creature", "gameobject", "item", "quest", "spell", "spawns", "loot", "fishing"}:
+    if operation not in {"creature", "gameobject", "item", "quest", "spell", "spawns", "loot", "fishing", "vendors"}:
         return {"operation": str(operation)[:40], "provenance": "none", "results": [], "truncated": False,
                 "error": "unknown_operation"}
     reference_resolution_truncated = False
     reference_resolution_error = None
     try:
         limit = _limit(args)
+        if operation == "vendors":
+            return _bounded_result(_vendors(args, limit, config_path))
         if operation in {"creature", "gameobject", "item", "quest"}:
             rows = _lookup_template(operation, args, limit, config_path)
             truncated = len(rows) > limit
@@ -729,10 +841,11 @@ def run_query(operation: str, args: dict[str, Any], config_path: str = DEFAULT_C
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("creature", "gameobject", "spawns", "quest", "fishing", "loot", "item", "spell"))
+    parser.add_argument("operation", choices=("creature", "gameobject", "spawns", "quest", "fishing", "loot", "item", "spell", "vendors"))
     parser.add_argument("--config", default=DEFAULT_CONFIG, help=argparse.SUPPRESS)
     parser.add_argument("--entry")
     parser.add_argument("--id")
+    parser.add_argument("--item-id")
     parser.add_argument("--name")
     parser.add_argument("--kind", choices=("creature", "gameobject"))
     parser.add_argument("--map-id")
@@ -743,6 +856,7 @@ def main() -> int:
     parser.add_argument("--z")
     parser.add_argument("--radius")
     parser.add_argument("--limit", default=20)
+    parser.add_argument("--offset")
     parsed = parser.parse_args()
     args = {key: value for key, value in vars(parsed).items() if key not in {"operation", "config"} and value is not None}
     result = run_query(parsed.operation, args, parsed.config)

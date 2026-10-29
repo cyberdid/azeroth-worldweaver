@@ -27,3 +27,6 @@ session-memory.json
 *.jsonl
 *.bak
 build/
+
+# Private in-progress vendor task authority
+.vendor-tasks/

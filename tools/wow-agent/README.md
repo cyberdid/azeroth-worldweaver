@@ -47,3 +47,11 @@ WOW_SERVER_CONFIG=/path/to/your/worldserver.conf \
 ```
 
 For configuration and integration, see the top-level [README](../../README.md) and [`SECURITY.md`](../../SECURITY.md).
+
+## Vendor browsing and purchase errands
+
+The source includes `vendor_inspect`, `vendor_buy`, `vendor_task_start`, `vendor_task_cancel`, `vendor_travel` and `vendor_travel_cancel` for both adapters. An inspection reports actual native merchant stock and per-bundle prices. Exact item-unit quantities, gold caps and extended-currency consent apply to purchases. The persistent worker finds candidate sellers, walks, uses known paid taxi paths or supported portal/transport graph routes, verifies stock at arrival, purchases and optionally returns without trading automatically.
+
+The read-only `vendors --item-id ID` or `vendors --name SUBSTRING` query locates configured sellers and spawns across the database. Optional arguments are `--entry`, `--map-id`, `--limit`, `--offset`. Static rows never prove current stock or access. Cross-map execution uses only supported native graph edges and verified physical transport transitions; unavailable graph data or geometry produces explicit failure. Runtime route validation is still required.
+
+Install `vendor_runtime.py` and `vendor_tasks.py` beside both adapters. The private `.vendor-tasks/` directory stores in-progress authorization and must be protected and excluded from Git. It survives bridge restarts but tasks do not carry over to a different world session. See [implementation and validation](../../docs/implementation-notes/2026-10-29-vendor-companions.md).

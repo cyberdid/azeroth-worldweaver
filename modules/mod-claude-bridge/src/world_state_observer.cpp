@@ -1843,6 +1843,24 @@ void PublishActionResultEvent(Player* requester, std::string const& actorName,
         requester->GetZoneId(), payload, detail);
 }
 
+void PublishVendorEvent(Player* actor, std::string const& type, std::string const& payload,
+    std::string const& detail)
+{
+    if (!actor || !actor->IsInWorld() || !actor->GetGroup() || !IsBridgeBot(actor->GetName())
+        || (type != "vendor_catalog" && type != "vendor_purchase"))
+        return;
+    PublishEvent(MakeGroupKey(actor->GetGroup(), actor), type, actor->GetName(), actor->GetMapId(),
+        actor->GetInstanceId(), actor->GetZoneId(), payload, detail);
+}
+
+void PublishVendorJourneyEvent(std::string const& groupId, std::string const& actorName,
+    uint32 mapId, std::string const& payload, std::string const& detail)
+{
+    if (groupId.empty() || !IsBridgeBot(actorName))
+        return;
+    PublishEvent(groupId, "vendor_journey", actorName, mapId, 0, 0, payload, detail);
+}
+
 void PublishNpcDialogEvent(Player* actor, std::string const& actionId)
 {
     if (!actor || !actor->IsInWorld() || !actor->GetGroup() || !actor->PlayerTalkClass
