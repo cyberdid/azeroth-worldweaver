@@ -2,7 +2,7 @@ diff --git a/src/server/game/Entities/Object/Object.h b/src/server/game/Entities
 index 58a0714..f90cfeb 100644
 --- a/src/server/game/Entities/Object/Object.h
 +++ b/src/server/game/Entities/Object/Object.h
-@@ -521,6 +521,7 @@ public:
+@@ -521,5 +521,6 @@ public:
 
      virtual void SetPhaseMask(uint32 newPhaseMask, bool update);
      [[nodiscard]] uint32 GetPhaseMask() const { return m_phaseMask; }

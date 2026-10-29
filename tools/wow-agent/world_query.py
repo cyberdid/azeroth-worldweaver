@@ -427,15 +427,30 @@ def _spell(args: dict[str, Any], limit: int, config_path: str) -> list[dict[str,
     return _limit_sql(base.format(where="LOCATE(?, s.Name_Lang_enUS) > 0"), [_name(args)], limit, config_path)
 
 
+def _creature_spawn_entry_column(config_path: str) -> str:
+    rows = _mysql_rows(
+        "SELECT JSON_OBJECT('column', COLUMN_NAME) FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME IN (?, ?)",
+        ["creature", "id1", "id"], config_path)
+    columns = {row.get("column") for row in rows}
+    if "id1" in columns:
+        return "id1"
+    if "id" in columns:
+        return "id"
+    raise QueryUnavailable("spawn_schema_unavailable")
+
+
 def _spawns(args: dict[str, Any], limit: int, config_path: str) -> list[dict[str, Any]]:
     kind = args.get("kind")
     if kind not in ("creature", "gameobject"):
         raise QueryInputError("invalid_kind")
-    table, entry_column, template_table, template_entry, pool_table, name_column = (
-        ("creature", "id1", "creature_template", "entry", "pool_creature", "name")
-        if kind == "creature" else
-        ("gameobject", "id", "gameobject_template", "entry", "pool_gameobject", "name")
-    )
+    if kind == "creature":
+        table, entry_column, template_table, template_entry, pool_table, name_column = (
+            "creature", _creature_spawn_entry_column(config_path), "creature_template", "entry",
+            "pool_creature", "name")
+    else:
+        table, entry_column, template_table, template_entry, pool_table, name_column = (
+            "gameobject", "id", "gameobject_template", "entry", "pool_gameobject", "name")
     alias = "s"
     filters = []
     parameters: list[Any] = []
@@ -500,6 +515,11 @@ def _spawns(args: dict[str, Any], limit: int, config_path: str) -> list[dict[str
     ORDER BY {"d.distance, d.guid" if x is not None else "d.guid"}
     LIMIT ?"""
     rows = _mysql_rows(statement, [*extra_params, *parameters, limit + 1], config_path)
+    if kind == "creature" and args.get("zone_id") is not None and not rows:
+        fallback_args = {key: value for key, value in args.items() if key != "zone_id"}
+        fallback_rows = _spawns(fallback_args, limit, config_path)
+        if fallback_rows and any(not row.get("zone_id") for row in fallback_rows):
+            raise QueryUnavailable("spawn_zone_metadata_unavailable")
     return rows
 
 

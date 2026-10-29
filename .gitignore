@@ -18,3 +18,12 @@ screenshots/
 codex-work/
 codex-history.txt
 codex-world-cursor.json
+
+# Runtime credentials, personal agent memory and build products
+*.cred
+*history.json
+*cursor.json
+session-memory.json
+*.jsonl
+*.bak
+build/

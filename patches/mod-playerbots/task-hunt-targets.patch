@@ -1,0 +1,111 @@
+diff --git a/src/Ai/Base/Value/GrindTargetValue.cpp b/src/Ai/Base/Value/GrindTargetValue.cpp
+index c93e7ee..63fe9a4 100644
+--- a/src/Ai/Base/Value/GrindTargetValue.cpp
++++ b/src/Ai/Base/Value/GrindTargetValue.cpp
+@@ -38,10 +38,15 @@ Unit* GrindTargetValue::FindTargetForGrinding(uint32 assistCount)
+         master = nullptr;
+ 
+     GuidVector attackers = context->GetValue<GuidVector>("attackers")->Get();
++    bool const taskHuntActive = botAI->GetTaskHuntTargetCount() != 0;
++    auto matchesTaskHunt = [this](Unit* unit)
++    {
++        return botAI->IsTaskHuntTarget(unit->GetEntry(), unit->GetMapId(), unit->GetZoneId(), unit->GetAreaId());
++    };
+     for (ObjectGuid const guid : attackers)
+     {
+         Unit* unit = botAI->GetUnit(guid);
+-        if (!unit || !unit->IsAlive())
++        if (!unit || !unit->IsAlive() || !matchesTaskHunt(unit))
+             continue;
+ 
+         return unit;
+@@ -58,7 +63,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(uint32 assistCount)
+     for (ObjectGuid const guid : targets)
+     {
+         Unit* unit = botAI->GetUnit(guid);
+-        if (!unit)
++        if (!unit || !matchesTaskHunt(unit))
+             continue;
+ 
+         if (!unit->IsInWorld() || unit->IsDuringRemoveFromWorld())
+@@ -71,7 +76,7 @@ Unit* GrindTargetValue::FindTargetForGrinding(uint32 assistCount)
+         if (!bot->IsHostileTo(unit) && unit->GetNpcFlags() != UNIT_NPC_FLAG_NONE)
+             continue;
+ 
+-        if (!bot->isHonorOrXPTarget(unit))
++        if (!taskHuntActive && !bot->isHonorOrXPTarget(unit))
+             continue;
+ 
+         if (abs(bot->GetPositionZ() - unit->GetPositionZ()) > INTERACTION_DISTANCE)
+diff --git a/src/Bot/PlayerbotAI.h b/src/Bot/PlayerbotAI.h
+index da22f6e..6e3e658 100644
+--- a/src/Bot/PlayerbotAI.h
++++ b/src/Bot/PlayerbotAI.h
+@@ -24,7 +24,11 @@
+ #include "SpellAuras.h"
+ #include "Util.h"
+ #include "WorldPacket.h"
++#include <algorithm>
++#include <atomic>
++#include <array>
+ #include <stack>
++#include <vector>
+ 
+ class Action;
+ class AiObjectContext;
+@@ -589,6 +593,43 @@ public:
+ 
+     void SetMaster(Player* newMaster) { master = newMaster; }
+     AiObjectContext* GetAiObjectContext() { return aiObjectContext; }
++    void SetTaskHuntTarget(uint32 entry, uint32 mapId, uint32 zoneId)
++    {
++        SetTaskHuntTargets(entry ? std::vector<uint32>{entry} : std::vector<uint32>{}, mapId, zoneId, 0);
++    }
++    void SetTaskHuntTargets(std::vector<uint32> const& entries, uint32 mapId, uint32 zoneId, uint32 areaId)
++    {
++        taskHuntTargetCount.store(0, std::memory_order_release);
++        uint32 const count = static_cast<uint32>(std::min(entries.size(), taskHuntTargetEntries.size()));
++        for (uint32 i = 0; i < count; ++i)
++            taskHuntTargetEntries[i].store(entries[i], std::memory_order_relaxed);
++        taskHuntTargetMapId.store(mapId, std::memory_order_relaxed);
++        taskHuntTargetZoneId.store(zoneId, std::memory_order_relaxed);
++        taskHuntTargetAreaId.store(areaId, std::memory_order_relaxed);
++        taskHuntTargetCount.store(count, std::memory_order_release);
++    }
++    uint32 GetTaskHuntTargetCount() const { return taskHuntTargetCount.load(std::memory_order_acquire); }
++    uint32 GetTaskHuntTargetEntry() const
++    {
++        return GetTaskHuntTargetCount() ? taskHuntTargetEntries[0].load(std::memory_order_relaxed) : 0;
++    }
++    uint32 GetTaskHuntTargetMapId() const { return taskHuntTargetMapId.load(std::memory_order_relaxed); }
++    uint32 GetTaskHuntTargetZoneId() const { return taskHuntTargetZoneId.load(std::memory_order_relaxed); }
++    bool IsTaskHuntTarget(uint32 entry, uint32 mapId, uint32 zoneId, uint32 areaId) const
++    {
++        uint32 const count = GetTaskHuntTargetCount();
++        if (!count)
++            return true;
++        if (mapId != GetTaskHuntTargetMapId()
++            || (GetTaskHuntTargetZoneId() && zoneId != GetTaskHuntTargetZoneId())
++            || (taskHuntTargetAreaId.load(std::memory_order_relaxed)
++                && areaId != taskHuntTargetAreaId.load(std::memory_order_relaxed)))
++            return false;
++        for (uint32 i = 0; i < count; ++i)
++            if (taskHuntTargetEntries[i].load(std::memory_order_relaxed) == entry)
++                return true;
++        return false;
++    }
+     ChatHelper* GetChatHelper() { return &chatHelper; }
+     bool IsOpposing(Player* player);
+     static bool IsOpposing(uint8 race1, uint8 race2);
+@@ -672,6 +713,11 @@ protected:
+     Position jumpDestination = Position();
+     uint32 nextTransportCheck = 0;
+     bool spellInterruptRequested = false;
++    std::array<std::atomic<uint32>, 16> taskHuntTargetEntries{};
++    std::atomic<uint32> taskHuntTargetCount{0};
++    std::atomic<uint32> taskHuntTargetMapId{0};
++    std::atomic<uint32> taskHuntTargetZoneId{0};
++    std::atomic<uint32> taskHuntTargetAreaId{0};
+ };
+ 
+ #endif

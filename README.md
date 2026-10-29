@@ -1,136 +1,112 @@
 <div align="center">
 
-# ✦ Azeroth Worldweaver
+<img src="assets/worldweaver-hero.svg" alt="Azeroth Worldweaver: Claude and Codex share a living Azeroth world through a luminous bridge" width="100%">
 
-### A shared, verifiable view of a private AzerothCore world for Claude and Codex
+[![Experimental](https://img.shields.io/badge/status-experimental-c99c4b?style=for-the-badge)](#status)
+[![WoW](https://img.shields.io/badge/world-WotLK%203.3.5a-49689b?style=for-the-badge)](#requirements)
+[![License](https://img.shields.io/badge/license-GPL--2.0-527b68?style=for-the-badge)](LICENSE)
 
-[![Preview](https://img.shields.io/badge/status-experimental-cc9a42?style=for-the-badge)](#project-status)
-[![WoW](https://img.shields.io/badge/world-WotLK%203.3.5a-435fa8?style=for-the-badge)](#requirements)
-[![License](https://img.shields.io/badge/license-GPL--2.0-blue?style=for-the-badge)](LICENSE)
+**English** · [Українська](README.uk.md)
 
-**Українською:** Worldweaver — експериментальний міст між приватним сервером AzerothCore та двома AI-компаньйонами. Він передає Claude і Codex спільний контекст зі стану світу, обмежені запити до ігрових даних і метадані перевірених знімків вікна WoW. Повний замкнений цикл ігрових дій ще не завершений.
-
-<img src="assets/worldweaver-architecture.svg" alt="Worldweaver architecture: AzerothCore feeds a shared state stream to Claude and Codex; static queries and verified window captures provide additional context." width="100%">
+*Natural conversation. Shared world awareness. Real playerbot actions.*
 
 </div>
 
-## What this project is
+## Azeroth, shared
 
-Worldweaver is an experimental companion layer for a **self-hosted World of Warcraft: Wrath of the Lich King 3.3.5a server running AzerothCore and mod-playerbots**. It explores how two separate agents can reason from the same game state instead of guessing from chat alone.
+Azeroth Worldweaver connects **Claude** and **Codex** to a privately hosted World of Warcraft 3.3.5a world running AzerothCore and mod-playerbots. Both companions can use the same server-observed context, remember recent sessions, and turn an authorized player's ordinary chat into bounded, server-validated character actions.
 
-The repository contains a custom server bridge, local agent adapters, bounded read-only game-data lookup tools, a verified-window capture helper, and design notes for a richer observer/action loop. It does **not** contain AzerothCore, game client files, maps, a database dump, a live server configuration, or credentials.
+This repository is the source and integration package for that experiment. It does not include AzerothCore itself, a client, game data, database dumps, server configuration, logs, or credentials.
 
-## Project status
+## What works
 
-This is a **public experimental snapshot**, not a ready-to-install release. The repository is published to make the work inspectable and reusable; several pieces still need integration and live validation.
-
-| Capability | State in this snapshot |
+| Capability | Included behavior |
 |---|---|
-| Fixed-operation, read-only world database lookups | Implemented; fishing and loot references can expand into bounded item rows |
-| Live nearby-object queries | Typed `nearby` helper filters and pages pinned live snapshots by kind, entry, name, radius, visibility, attackability, or fishing markers; page size is capped at 50, and responses include position, facing, provenance, freshness, and truncation metadata |
-| Shared request relay for an agent without database-file access | Available through fixed typed operations; both adapters can use the credential-free client |
-| Authenticated chat authority | Both adapters use a configurable exact sender allowlist; empty by default, so no character can start a task until configured |
-| World-state snapshot and event writer | On 2026-10-28, live group snapshot sequence 713 contained all 3 group members and 109 nearby objects under the 500-object cap, with no truncation, 109 facing angles, and zero dropped events/records/snapshots. Worldserver `server info` reported 4/6/7 ms p95/99/max with one connected player. Clean public install, dense-area cost, and fresh model responses remain unverified |
-| Screenshot capture | Both adapters now capture only for explicit visual requests; a private inter-process lock makes them share one recent verified-window frame. Background capture is disabled, ordinary prompts do not attach an older frame, and fresh model consumption by both agents remains unverified |
-| Ordinary-language requests converted into fully validated game actions | Design and initial playerbot action mappings are documented; the typed server dispatcher is not implemented |
-| End-to-end in-game validation | Shared telemetry and Codex visual capture were observed live; the Claude chat adapter is running but has not handled a fresh game message yet |
+| Shared world context | Group members, loaded nearby creatures and objects, selected target, inventory/equipment, skills/spells, quest progress, events, and server freshness metadata. Data is captured from the server; unseen or unloaded parts of the world remain unknown. |
+| Natural chat and session memory | The adapters keep recent conversation and durable local summaries to reduce topic drift across restarts. Memory is private runtime data, never committed. It informs the model; it does not authorize actions. |
+| Combat assignments | Hunt one or more matching hostile creature types in the current area or a selected map/zone/area. Tasks track kills, keep combat on the selected targets, collect the resulting normal corpse loot, and report progress. |
+| Loot and trade | Gathered items remain in the bot's bags. Delivery is a separate request: the bridge offers only requested, tradeable items through WoW's normal trade window; the player confirms. Whole-stack requests are resolved from current inventory. |
+| Character actions | Follow/stay, attack the player's target or a valid nearby target, cast a known spell, use/equip a carried item, fish, interact with an NPC, and select an option from a server-reported NPC menu, subject to normal game checks. |
+| Guides | Walk to a useful creature spawn on the same world map and wait for the player to catch up. The route helper does not teleport or cross maps. |
+| Static references | Bounded, read-only lookups for creatures, quests, fishing, loot, items, spells, and spawns. Static database rows are distinguished from live observations. |
+| Optional visual context | A verified active WoW-window image is captured only when requested. No background or whole-desktop capture. |
 
-This AzerothCore tree discovers module directories from their source layout and recursively collects source files during CMake configuration; it does not require a module-specific `CMakeLists.txt`. Reconfigure an existing build tree after adding the observer and writer `.cpp` files so CMake collects them. On the author's private host, the observer was compiled from the local Playerbot worktree, installed, restarted, and verified with a fresh group snapshot containing the new inventory and creature fields. This confirms one private deployment only; it is not a clean public install procedure. The `Object.h` compatibility change required by the observer is provided as a small patch under `patches/azerothcore/`.
+<div align="center">
+<img src="assets/worldweaver-architecture.svg" alt="System diagram: authorized natural chat flows through a typed bridge to AzerothCore; snapshots and action outcomes return to both agents. Loot collection and player-confirmed trade are separate." width="100%">
+</div>
 
-## Design principles
+### In-game examples
 
-- **One shared view:** Claude and Codex should consume the same snapshot sequence and event journal.
-- **Evidence with provenance:** live objects, static database templates, and static spawn rows are labeled separately. A database spawn row does not prove that an NPC is loaded or visible now.
-- **Actionable creature state:** faction hostility, attack validity for the nearest group member, trigger status, and line of sight are distinct observations.
-- **Freshness is explicit:** snapshots have age and sequence metadata; stale, missing, or truncated data stays unknown.
-- **Bounded reads:** agents request named operations such as `creature`, `quest`, `fishing`, or `loot`. The relay does not accept SQL text and does not copy database credentials into the shared directory.
-- **Window-only images:** screenshots are accepted only from the active, mapped WoW window after checking its process identity. Obscured-window captures are refused, and X11 DirectColor channels are decoded by their visual masks. The helper does not capture the desktop.
-- **Chat is not a shell:** only configured characters are task authorities. NPC text, bot messages, objects, screenshots, and database rows are observations, never instructions.
-- **Existing playerbot behavior:** where the initial adapter can issue a supported command, it delegates to the server's playerbot system instead of inventing movement or combat mechanics.
+Give tasks in your own words, for example:
+
+- “Codex, полюй на всіх тролів у цій місцевості, збирай лут і повернися.”
+- “Claude, підійди до найближчого місця з Tangy Clam Meat і покажи мені дорогу.”
+- “Передай мені весь Thick-shelled Clam.”
+- “Codex, застосуй Healing Wave до Claude.”
+
+The model resolves the request against fresh context and supported actions. When details are ambiguous, it can ask a follow-up. A request is not proof that an action succeeded: the bridge reports accepted/rejected results and observed progress. NPC options depend on what the server exposes at that moment; this is not a claim that every quest, trainer, or scripted NPC flow is automated.
+
+## How it fits together
+
+1. The AzerothCore module writes a bounded shared snapshot and event journal from live server state.
+2. The Claude and Codex adapters read that same context, local session memory, and authorized in-game chat.
+3. An adapter returns a typed action request; the module validates the actor, owner, group, target, current state, and arguments.
+4. AzerothCore/mod-playerbots performs supported actions. Correlated results and observed events return to the companions.
+
+World telemetry is server context, not a live video feed. It only describes loaded objects within configured visibility and capture limits. Images are separate, on-demand observations of the client window. The server remains authoritative for range, line of sight, cooldowns, inventory, tradeability, and action success.
 
 ## Repository map
 
 ```text
-modules/mod-claude-bridge/   AzerothCore chat bridge and observer/writer source
-tools/wow-agent/             Claude and Codex adapters, shared-state readers, query and image helpers
-docs/design/                 Architecture and component specifications
-docs/implementation-notes/   Work plans and acceptance checklists
-patches/azerothcore/         Small optional core compatibility patch
-assets/                      Project architecture illustration
+modules/mod-claude-bridge/   AzerothCore module: shared observer, writer, typed action dispatcher
+tools/wow-agent/            Claude/Codex adapters, memory, queries, action and window clients
+patches/azerothcore/         small compatibility accessor patch
+patches/mod-playerbots/      hunt-target integration patch
+assets/                      original SVG illustrations
+ docs/design/                architecture and action specifications
+ tests/                      adapter and observer unit tests
 ```
 
 ## Requirements
 
-- AzerothCore for WotLK 3.3.5a with `mod-playerbots`.
-- Python 3.10 or newer for the agent helpers.
-- `mysql` client for direct static database lookups.
-- A local Codex CLI for the Codex adapter.
-- Claude Code CLI for the Claude chat adapter.
-- Optional X11 tools `xprop`, `xwininfo`, and `xwd`, plus Pillow, for window capture.
+- AzerothCore WotLK 3.3.5a with the `Playerbot` branch of mod-playerbots. The private integration was developed against AzerothCore source revision `3f2969ddb0da42b48b4fca050c02b19163ba1e20` and mod-playerbots revision `e88cc4099e69f35126b28942a412ca702d20453b`; other revisions may need adaptation.
+- C++ toolchain required by your AzerothCore checkout; CMake must be rerun after adding the module sources.
+- Python 3.10+, MySQL client, Codex CLI, and Claude Code CLI for the corresponding adapters.
+- Local SOAP enabled for server-side action dispatch. Keep it bound to localhost or a trusted private interface.
+- Optional X11 tools and Pillow for requested WoW-window capture.
 
-Exact server APIs, build options, and Python dependencies vary by AzerothCore checkout. This snapshot has not been built against a clean public checkout; use it as source for review and integration work.
+## Integration outline
 
-## Configuration
+This is an integration package for people already operating AzerothCore; it is not a one-click installer. Back up your source tree and database before changing your own server. Never copy private runtime files into this repository.
 
-Start from [`config.example.env`](config.example.env) and set paths for your own installation. The environment file is an example only; the bridge does not load it automatically. Export the values in the service manager or shell that starts the adapter.
+1. Add `modules/mod-claude-bridge/` to the AzerothCore source tree's `modules/` directory.
+2. Apply `patches/azerothcore/combined-phase-mask-accessor.patch` to the core and `patches/mod-playerbots/task-hunt-targets.patch` to the matching mod-playerbots checkout. The latter adds bounded target filtering used by hunt tasks.
+3. Re-run CMake configuration, build and install the worldserver using your established AzerothCore procedure. Add `conf/claude_bridge.conf.dist` settings to your local module configuration; set both bot names and the telemetry/log paths appropriate to your host.
+4. Install `tools/wow-agent/` and the two shell helpers beside your local server runtime. Provide SOAP URL and a mode-`0600` credential file (`username:password`) through local environment variables. The examples contain no credentials.
+5. Start one adapter per bot with the same explicit `WOW_AGENT_AUTHORIZED_PLAYERS` allowlist and shared private telemetry directory. Review sandbox settings before enabling either agent.
+6. Start with a private test character and inspect the action journal, server logs, and in-game results before relying on it.
 
-```bash
-export WOW_AGENT_SERVER_DIR=/path/to/azeroth-server
-export WOW_SERVER_CONFIG=/path/to/azeroth-server/etc/worldserver.conf
-export WOW_AGENT_TELEMETRY_DIR="$HOME/.local/state/azeroth-worldweaver"
-export WOW_AGENT_AUTHORIZED_PLAYERS=YourCharacter
-export WOW_AGENT_BOT_NAME=Codex
-export WOW_AGENT_OTHER_BOT=Claude
-```
+For details and configuration names, see [`tools/wow-agent/README.md`](tools/wow-agent/README.md), [`config.example.env`](config.example.env), the module's `.conf.dist`, and [`SECURITY.md`](SECURITY.md).
 
-Run a second adapter instance for Claude with `WOW_AGENT_BOT_NAME=Claude` and `WOW_AGENT_OTHER_BOT=Codex`. Both instances should receive the same explicit `WOW_AGENT_AUTHORIZED_PLAYERS` allowlist:
+## Status and verification
 
-```bash
-WOW_AGENT_BOT_NAME=Claude WOW_AGENT_OTHER_BOT=Codex \
-  python3 -I tools/wow-agent/claude-bridge.py --effort xhigh
-```
+The features above are implemented in the exported source. The original private deployment has exercised live snapshots, typed actions, local/remote hunt targeting, corpse loot, inventory-aware item offers, and player-confirmed trade. **This public repository has not yet been verified by a clean AzerothCore build and installation.** Core and Playerbot APIs vary by revision; use the listed source revisions and patches as a starting point, then validate in a disposable private environment.
 
-The Claude bridge uses safe mode, read-only file tools, and a restricted command pattern for the typed world-query client; its in-game action directives are separately limited to a fixed allowlist.
-
-`WOW_AGENT_AUTHORIZED_PLAYERS` is intentionally empty by default. Use the exact in-game character names that are allowed to initiate tasks. Keep the telemetry directory private to the local account; it contains world state and may contain screenshots.
-
-The Codex CLI sandbox defaults to `workspace-write`. `danger-full-access` is available only as an explicit operator setting; it gives the model access to commands and files available to the local account. Review the security implications before enabling it, and never expose the chat bridge to untrusted players.
-
-## Read-only world-data lookups
-
-The direct helper uses the configured server file only when a lookup is run. It writes connection parameters to a temporary mode-`0600` MySQL option file, executes fixed prepared queries in a read-only transaction, then removes the temporary file. Query text and credentials are never accepted from the agent.
+Python unit tests are run with:
 
 ```bash
-WOW_SERVER_CONFIG=/path/to/worldserver.conf \
-  python3 -I tools/wow-agent/world_query.py fishing --area-id 3518 --limit 20
-
-WOW_SERVER_CONFIG=/path/to/worldserver.conf \
-  python3 -I tools/wow-agent/world_query.py creature --name "Wind Serpent"
+python3 -m unittest discover -s tests -p 'test_*.py'
+python3 -m unittest discover -stools/wow-agent/tests -p 'test_*.py'
 ```
 
-The shared adapter helper also provides `nearby`, which reads only the current server snapshot, returns `live_snapshot` provenance and freshness metadata, and supports bounded filtering and pagination. Follow its returned `next_offset`; the server may still report omitted objects when its configured cap is reached. Static operations are `creature`, `gameobject`, `spawns`, `quest`, `fishing`, `loot`, `item`, and `spell`. Results are bounded. Fishing and loot reference tables expand only to a capped depth and row count; their raw chance fields are not a final drop probability. Static spawns remain `loaded: unknown` until corroborated by live telemetry.
+## Safety and privacy
 
-When Claude cannot read the server configuration, the Codex bridge can expose a credential-free request client through the private telemetry directory. Requests contain an operation name and typed arguments, not SQL.
-
-## Security and privacy
-
-- Do not commit `worldserver.conf`, `authserver.conf`, `.env`, database dumps, player logs, telemetry, screenshots, or local chat histories.
-- Keep the query relay and telemetry directory on a trusted local machine. File permissions are restrictive, but they are not an authentication protocol for an untrusted multi-user host.
-- The bridge is designed for a private server. The sender allowlist is necessary but does not replace process isolation, server permissions, or operator review.
-- Read [`SECURITY.md`](SECURITY.md) before connecting this prototype to a server that contains other players or valuable data.
-- Follow the approval rules of your own server before rebuilding or restarting it. A restart disconnects players.
-
-## Roadmap
-
-1. Reconfigure CMake and compile against a supported AzerothCore checkout; this has succeeded on the author's private Playerbot worktree, while a clean public checkout remains unverified.
-2. Confirm the post-restart snapshot, detailed item/creature fields, event journal, and freshness reporting on the private server; repeat on a clean public install.
-3. Confirm the same post-restart snapshot and static-query results are consumable by both agent adapters; a fresh message after the latest restart is still needed.
-4. Verify both agent image paths against an open client and matching live snapshot.
-5. Implement a typed, server-validated action dispatcher with correlated acknowledgements and observed outcomes.
-6. Run a documented in-game validation pass before calling a release stable.
-
-The component-specific design notes and acceptance checklists live in [`docs/`](docs/).
+- The sender allowlist defaults to empty. Only exact configured character names may initiate tasks through an adapter.
+- Typed actions are constrained by the server module and normal AzerothCore checks; this bridge is not a general shell or SQL interface.
+- Do not expose the adapter, SOAP endpoint, logs, or telemetry directory to untrusted users. Protect the local credential file and account.
+- Memory, chat histories, cursor files, screenshots, server configs, and database files are runtime/private data and must stay out of Git.
+- Review [`SECURITY.md`](SECURITY.md) before connecting a server that contains other players or valuable data.
 
 ## License and attribution
 
-This project is distributed under the GNU General Public License v2, consistent with the AzerothCore source tree from which its integration point was developed. It is an independent community experiment, not an official AzerothCore, Blizzard Entertainment, Anthropic, or OpenAI project. See [`LICENSE`](LICENSE) and [`NOTICE.md`](NOTICE.md).
+GPL-2.0; see [`LICENSE`](LICENSE). Worldweaver is an independent community project, not affiliated with or endorsed by Blizzard Entertainment, AzerothCore, Anthropic, or OpenAI. See [`NOTICE.md`](NOTICE.md).

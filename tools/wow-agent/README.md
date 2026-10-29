@@ -1,9 +1,49 @@
-# Agent helper tools
+# Agent and telemetry helpers
 
-These scripts provide both game-chat adapters, read-only access to shared AzerothCore telemetry and static world data, plus a verified WoW-window capture helper. Start with the repository [configuration guide](../../README.md#configuration) and [security notes](../../SECURITY.md).
+These local Python and shell helpers connect the Claude and Codex adapters to an AzerothCore installation. Run them as a trusted local operating-system user; do not expose their files or SOAP access to public chat.
 
-The direct `world_query.py` helper reads the server configuration path from `WOW_SERVER_CONFIG` or `--config`. The bridge relay serves only the named operations in `world_query_service.py`; requests contain typed arguments and never SQL or connection secrets.
+## Shared state
 
-`world_state.py` validates snapshot and event sequence data. `wow_window_capture.py` only captures the active, mapped WoW window whose process can be verified, and the adapters invoke it only for explicit visual requests. A private inter-process lock serializes simultaneous requests so both agents reuse the same recent frame; ordinary prompts do not attach an old image. World telemetry continues independently. Both adapters require an explicit sender allowlist. The Claude adapter runs with read-only file tools and a single typed world-query command pattern; its game directives are limited to a fixed playerbot allowlist.
+Set `ClaudeBridge.TelemetryDir` in the module configuration to a private directory readable by the worldserver and both adapters. The server atomically writes `world-state-<group>.json` snapshots and bounded, rotating `world-events-<group>.jsonl` journals. The readers report snapshot age/sequence, event gaps and truncation rather than treating missing data as proof that something does not exist.
 
-See the root README for the current implementation status. This snapshot has not been validated as a complete install.
+Install these files side by side because the adapters load trusted sibling modules while Python isolated mode is enabled:
+
+- `codex-bridge.py`, `claude-bridge.py`
+- `action_client.py`, `session_memory.py`, `world_state.py`
+- `world_query.py`, `world_query_service.py`, `world_query_client.py`
+- `wow_window_capture.py`
+
+The service publishes one credential-free, fixed-operation query client for both agents. Static game-data lookups are read-only and bounded; static spawns do not prove an object is loaded or visible now.
+
+## Actions and item handoff
+
+The adapters can return typed actions for supported playerbot operations: follow/stay, attack, cast a known active spell, use/equip an exact carried item, fishing, NPC menu interaction, guides, hunts, and item offers. The server validates each request and reports a correlated result. Ordinary conversation is not passed to SOAP as an arbitrary server command.
+
+Hunts use live matching targets and server-validated map/zone/area constraints. Kills are credited by the server; the task controller opens normal corpse loot and waits for inventory results. `collect_loot` keeps drops in the bot's bags. `deliver_loot` is separate and must be explicitly requested. Trade uses the normal WoW trade window; only currently held, tradeable requested items are offered, within the six-slot limit, and the player confirms the exchange. No direct inventory edits or trade acceptance are exposed.
+
+Both adapters share a private `session-memory.json` archive in the telemetry directory. It can bring recent, relevant user and bot messages into a prompt across adapter restarts. The memory is context only: only a current message from an exact character in `WOW_AGENT_AUTHORIZED_PLAYERS` can start or cancel a task.
+
+## Configuration
+
+Copy `config.example.env` to a private environment file (not committed) or configure the same variables in your service manager. Set `WOW_AGENT_SERVER_DIR`, `WOW_SERVER_CONFIG`, a shared private `WOW_AGENT_TELEMETRY_DIR`, distinct `WOW_AGENT_BOT_NAME` values (`Codex` and `Claude`), and the same exact comma-separated `WOW_AGENT_AUTHORIZED_PLAYERS` for both adapters. Keep `WOW_AGENT_CODEX_SANDBOX` at the least permissive setting that supports your workflow.
+
+For SOAP helpers, set `WOW_SOAP_URL` and `WOW_SOAP_CREDENTIAL_FILE`. The credential file must contain `username:password` and have mode `0600`; do not put the value itself in shell history, source control, screenshots, or logs. Keep SOAP local or behind trusted network controls. `claude-cmd.sh` is a local operational helper; it is not exposed as a free-form in-game agent action.
+
+## On-demand visual context
+
+The adapters request `wow_window_capture.py` only after an authorized user asks for visual inspection. It verifies the active, mapped WoW window and process, captures that window only, and associates the image with the matching world snapshot. Hidden, obscured, minimized, ambiguous, stale, or unverifiable windows are refused. No periodic or whole-desktop capture is performed.
+
+The helper needs X11 tools (`xprop`, `xwininfo`, `xwd`) and Pillow. Its output belongs in the private telemetry directory and must not be committed.
+
+## Static world-data queries
+
+`world_query.py` reads the configured server database settings at runtime and runs fixed prepared queries in read-only transactions. It creates a temporary mode-`0600` MySQL options file and removes it after use. It never accepts SQL text from an agent. Operations include `creature`, `gameobject`, `spawns`, `quest`, `fishing`, `loot`, `item`, and `spell`; responses and nested loot references are bounded.
+
+Example:
+
+```bash
+WOW_SERVER_CONFIG=/path/to/your/worldserver.conf \
+  python3 -I tools/wow-agent/world_query.py creature --name "Wind Serpent"
+```
+
+For configuration and integration, see the top-level [README](../../README.md) and [`SECURITY.md`](../../SECURITY.md).

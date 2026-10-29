@@ -8,6 +8,7 @@
 #include "DatabaseEnv.h"
 #include "GameObject.h"
 #include "GameTime.h"
+#include "GossipDef.h"
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
 #include "Group.h"
@@ -17,6 +18,9 @@
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Player.h"
+#include "AiObjectContext.h"
+#include "PlayerbotAI.h"
+#include "Playerbots.h"
 #include "PlayerScript.h"
 #include "QuestDef.h"
 #include "ScriptMgr.h"
@@ -27,6 +31,7 @@
 #include "World.h"
 #include "WorldScript.h"
 #include "WorldSessionMgr.h"
+#include "action_dispatcher.h"
 #include "world_state_observer.h"
 #include "world_state_writer.h"
 
@@ -57,6 +62,7 @@ namespace
     constexpr uint32 DEFAULT_MAX_NEARBY_OBJECTS = 500;
     constexpr uint32 MAX_AURAS_IN_SNAPSHOT = 32;
     constexpr uint32 MAX_INVENTORY_ITEMS_IN_SNAPSHOT = 60;
+    constexpr std::size_t MAX_PLAYERBOT_ACTIONS_IN_SNAPSHOT = 512;
     constexpr std::size_t MAX_CONFIGURED_BOTS = 16;
     constexpr std::size_t MAX_TRACKED_OBJECTS = 8192;
     constexpr std::size_t MAX_PENDING_OBSERVER_EVENTS_PER_GROUP = 256;
@@ -80,6 +86,7 @@ namespace
         uint64 targetGuid = 0;
         bool inCombat = false;
         uint8 healthBand = 0;
+        std::unordered_map<uint32, std::string> questProgress;
     };
 
     struct GroupSequence
@@ -188,6 +195,41 @@ namespace
             }
         }
         return escaped;
+    }
+
+    char const* PowerTypeName(Powers power)
+    {
+        switch (power)
+        {
+            case POWER_MANA: return "mana";
+            case POWER_RAGE: return "rage";
+            case POWER_FOCUS: return "focus";
+            case POWER_ENERGY: return "energy";
+            case POWER_HAPPINESS: return "happiness";
+            case POWER_RUNE: return "runes";
+            case POWER_RUNIC_POWER: return "runic_power";
+            default: return "unknown";
+        }
+    }
+
+    char const* QuestDialogStatusName(QuestGiverStatus status)
+    {
+        switch (status)
+        {
+            case DIALOG_STATUS_NONE: return "none";
+            case DIALOG_STATUS_UNAVAILABLE: return "unavailable";
+            case DIALOG_STATUS_LOW_LEVEL_AVAILABLE: return "low_level_available";
+            case DIALOG_STATUS_LOW_LEVEL_REWARD_REP: return "low_level_repeatable_reward";
+            case DIALOG_STATUS_LOW_LEVEL_AVAILABLE_REP: return "low_level_repeatable_available";
+            case DIALOG_STATUS_INCOMPLETE: return "incomplete";
+            case DIALOG_STATUS_REWARD_REP: return "repeatable_reward";
+            case DIALOG_STATUS_AVAILABLE_REP: return "repeatable_available";
+            case DIALOG_STATUS_AVAILABLE: return "available";
+            case DIALOG_STATUS_REWARD2: return "reward_no_minimap_dot";
+            case DIALOG_STATUS_REWARD: return "reward";
+            case DIALOG_STATUS_SCRIPTED_NO_STATUS: return "scripted_unknown";
+            default: return "unknown";
+        }
     }
 
     std::vector<std::string> GetNpcRoles(Creature const* creature)
@@ -660,6 +702,41 @@ namespace
         }
     };
 
+    void AppendQuestObjectiveDetails(std::ostream& out, Quest const* quest, QuestStatusData const* status)
+    {
+        out << ",\"item_objectives\":[";
+        bool first = true;
+        if (quest)
+            for (uint8 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
+                if (quest->RequiredItemId[i] && quest->RequiredItemCount[i])
+                {
+                    if (!first)
+                        out << ',';
+                    first = false;
+                    out << "{\"entry\":" << quest->RequiredItemId[i]
+                        << ",\"current\":" << (status ? status->ItemCount[i] : 0)
+                        << ",\"required\":" << quest->RequiredItemCount[i] << '}';
+                }
+
+        out << "],\"creature_objectives\":[";
+        first = true;
+        if (quest)
+            for (uint8 i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+                if (quest->RequiredNpcOrGo[i] && quest->RequiredNpcOrGoCount[i])
+                {
+                    if (!first)
+                        out << ',';
+                    first = false;
+                    int32 const target = quest->RequiredNpcOrGo[i];
+                    uint32 const entry = static_cast<uint32>(target > 0 ? target : -target);
+                    out << "{\"type\":\"" << (target > 0 ? "creature" : "gameobject")
+                        << "\",\"entry\":" << entry
+                        << ",\"current\":" << (status ? status->CreatureOrGOCount[i] : 0)
+                        << ",\"required\":" << quest->RequiredNpcOrGoCount[i] << '}';
+                }
+        out << ']';
+    }
+
     std::string BuildSnapshot(GroupContext const& context, uint64 snapshotSeq, uint64 eventSeq,
         uint32 maxNearbyObjects, float configuredRadius, std::string& compactContext)
     {
@@ -670,6 +747,10 @@ namespace
         std::ostringstream out;
         out << std::fixed << std::setprecision(1);
         out << "{\"schema_version\":" << TELEMETRY_SCHEMA_VERSION
+            << ",\"observer_features\":{\"playerbot_strategy\":true,\"quest_objectives\":true"
+            << ",\"quest_dialog_by_member\":true,\"stable_entity_guids\":true,\"active_class_power\":true"
+            << ",\"known_spells\":true,\"npc_dialog\":true"
+            << "}"
             << ",\"session_id\":\"" << JsonEscape(sessionId)
             << "\",\"group_id\":\"" << context.key
             << "\",\"snapshot_seq\":" << snapshotSeq
@@ -711,11 +792,48 @@ namespace
             Unit* target = member->GetSelectedUnit();
             if (target == member)
                 target = nullptr;
+            PlayerbotAI* botAI = IsBridgeBot(member->GetName()) ? sPlayerbotsMgr.GetPlayerbotAI(member) : nullptr;
             Spell* genericCast = member->GetCurrentSpell(CURRENT_GENERIC_SPELL);
             Spell* channelCast = member->GetCurrentSpell(CURRENT_CHANNELED_SPELL);
 
             out << "{\"name\":\"" << JsonEscape(member->GetName())
+                << "\",\"guid\":\"" << member->GetGUID().GetRawValue()
                 << "\",\"bridge_bot\":" << (IsBridgeBot(member->GetName()) ? "true" : "false")
+                << ",\"playerbot\":";
+            if (botAI)
+            {
+                Player* master = botAI->GetMaster();
+                out << "{\"master\":\"" << JsonEscape(master ? master->GetName() : "")
+                    << "\",\"strategies\":{\"follow\":"
+                    << (botAI->HasStrategy("follow", BOT_STATE_NON_COMBAT) ? "true" : "false")
+                    << ",\"stay\":" << (botAI->HasStrategy("stay", BOT_STATE_NON_COMBAT) ? "true" : "false")
+                    << ",\"master_fishing\":" << (botAI->HasStrategy("master fishing", BOT_STATE_NON_COMBAT) ? "true" : "false")
+                    << ",\"quest\":" << (botAI->HasStrategy("quest", BOT_STATE_NON_COMBAT) ? "true" : "false")
+                    << ",\"loot\":" << (botAI->HasStrategy("loot", BOT_STATE_NON_COMBAT) ? "true" : "false")
+                    << ",\"grind\":" << (botAI->HasStrategy("grind", BOT_STATE_NON_COMBAT) ? "true" : "false")
+                    << "},\"moving\":" << (member->isMoving() ? "true" : "false")
+                    << ",\"state\":" << unsigned(botAI->GetState());
+                std::set<std::string> actions = botAI->GetAiObjectContext()
+                    ? botAI->GetAiObjectContext()->GetSupportedActions() : std::set<std::string>{};
+                out << ",\"available_actions_total\":" << actions.size()
+                    << ",\"available_actions_truncated\":"
+                    << (actions.size() > MAX_PLAYERBOT_ACTIONS_IN_SNAPSHOT ? "true" : "false")
+                    << ",\"available_actions\":[";
+                std::size_t actionIndex = 0;
+                for (std::string const& action : actions)
+                {
+                    if (actionIndex >= MAX_PLAYERBOT_ACTIONS_IN_SNAPSHOT)
+                        break;
+                    if (actionIndex++)
+                        out << ',';
+                    out << '\"' << JsonEscape(action) << '\"';
+                }
+                out << "]}";
+            }
+            else
+                out << "null";
+            out << ",\"agent_task\":" << GetAgentHuntStatusJson(member->GetName());
+            out
                 << ",\"level\":" << unsigned(member->GetLevel())
                 << ",\"class_id\":" << unsigned(member->getClass())
                 << ",\"map_id\":" << member->GetMapId()
@@ -732,6 +850,11 @@ namespace
                 << ",\"pct\":" << member->GetHealthPct() << '}'
                 << ",\"mana\":{\"current\":" << member->GetPower(POWER_MANA) << ",\"max\":" << member->GetMaxPower(POWER_MANA)
                 << ",\"pct\":" << member->GetPowerPct(POWER_MANA) << '}'
+                << ",\"power\":{\"type_id\":" << unsigned(member->getPowerType())
+                << ",\"type\":\"" << PowerTypeName(member->getPowerType())
+                << "\",\"current\":" << member->GetPower(member->getPowerType())
+                << ",\"max\":" << member->GetMaxPower(member->getPowerType())
+                << ",\"pct\":" << member->GetPowerPct(member->getPowerType()) << '}'
                 << ",\"alive\":" << (member->IsAlive() ? "true" : "false")
                 << ",\"in_combat\":" << (member->IsInCombat() ? "true" : "false")
                 << ",\"target\":";
@@ -763,7 +886,33 @@ namespace
                     out << "{\"spell_id\":" << spellInfo->Id
                         << ",\"name\":\"" << JsonEscape(spellName ? spellName : "") << "\"}";
                 }
-            out << "]"
+            out << "],\"known_spells_total\":";
+            std::vector<uint32> knownSpellIds;
+            knownSpellIds.reserve(member->GetSpellMap().size());
+            for (auto const& [spellId, playerSpell] : member->GetSpellMap())
+                if (playerSpell && playerSpell->State != PLAYERSPELL_REMOVED && sSpellMgr->GetSpellInfo(spellId))
+                    knownSpellIds.push_back(spellId);
+            std::sort(knownSpellIds.begin(), knownSpellIds.end());
+            constexpr std::size_t MAX_KNOWN_SPELLS = 256;
+            out << knownSpellIds.size()
+                << ",\"known_spells_truncated\":" << (knownSpellIds.size() > MAX_KNOWN_SPELLS ? "true" : "false")
+                << ",\"known_spells\":[";
+            for (std::size_t i = 0; i < std::min(knownSpellIds.size(), MAX_KNOWN_SPELLS); ++i)
+            {
+                if (i)
+                    out << ',';
+                uint32 const spellId = knownSpellIds[i];
+                PlayerSpell const* playerSpell = member->GetSpellMap().at(spellId);
+                SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
+                char const* spellName = spellInfo->SpellName[locale];
+                if (!spellName || !*spellName)
+                    spellName = spellInfo->SpellName[LOCALE_enUS];
+                out << "{\"spell_id\":" << spellId
+                    << ",\"name\":\"" << JsonEscape(spellName ? spellName : "")
+                    << "\",\"passive\":" << (spellInfo->IsPassive() ? "true" : "false")
+                    << ",\"active\":" << (playerSpell->Active ? "true" : "false") << '}';
+            }
+            out << ']'
                 << ",\"skills\":{\"fishing\":" << member->GetSkillValue(SKILL_FISHING)
                 << ",\"cooking\":" << member->GetSkillValue(SKILL_COOKING)
                 << ",\"first_aid\":" << member->GetSkillValue(SKILL_FIRST_AID)
@@ -819,7 +968,8 @@ namespace
                 out << "{\"bag\":" << unsigned(bagSlot) << ",\"slot\":" << itemSlot
                     << ",\"entry\":" << item->GetEntry()
                     << ",\"name\":\"" << JsonEscape(itemTemplate ? itemTemplate->Name1 : "Unknown")
-                    << "\",\"count\":" << item->GetCount() << '}';
+                    << "\",\"count\":" << item->GetCount()
+                    << ",\"tradeable\":" << (item->CanBeTraded(false, true) ? "true" : "false") << '}';
             };
 
             // Main backpack slots use bag 255; raw slot IDs passed to the one-argument
@@ -872,6 +1022,7 @@ namespace
                 Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
                 QuestStatusMap const& statuses = member->getQuestStatusMap();
                 auto status = statuses.find(questId);
+                QuestStatusData const* statusData = status == statuses.end() ? nullptr : &status->second;
                 out << "{\"id\":" << questId
                     << ",\"title\":\"" << JsonEscape(quest ? quest->GetTitle() : "Unknown")
                     << "\",\"status\":" << unsigned(status == statuses.end() ? QUEST_STATUS_NONE : status->second.Status)
@@ -889,7 +1040,9 @@ namespace
                         out << ',';
                     out << (status == statuses.end() ? 0 : status->second.CreatureOrGOCount[i]);
                 }
-                out << "],\"explored\":" << (status != statuses.end() && status->second.Explored ? "true" : "false") << '}';
+                out << ']';
+                AppendQuestObjectiveDetails(out, quest, statusData);
+                out << ",\"explored\":" << (statusData && statusData->Explored ? "true" : "false") << '}';
             }
             out << ']';
 
@@ -935,6 +1088,15 @@ namespace
                     << "% combat=" << (member->IsInCombat() ? "yes" : "no")
                     << " fishing=" << member->GetSkillValue(SKILL_FISHING) << '/' << member->GetMaxSkillValue(SKILL_FISHING);
 
+                if (PlayerbotAI* botAI = IsBridgeBot(member->GetName()) ? sPlayerbotsMgr.GetPlayerbotAI(member) : nullptr)
+                    compact << " playerbot_master=" << (botAI->GetMaster() ? botAI->GetMaster()->GetName() : "unknown")
+                        << " strategies[follow=" << (botAI->HasStrategy("follow", BOT_STATE_NON_COMBAT) ? "on" : "off")
+                        << ",stay=" << (botAI->HasStrategy("stay", BOT_STATE_NON_COMBAT) ? "on" : "off")
+                        << ",fishing=" << (botAI->HasStrategy("master fishing", BOT_STATE_NON_COMBAT) ? "on" : "off")
+                        << ",quest=" << (botAI->HasStrategy("quest", BOT_STATE_NON_COMBAT) ? "on" : "off")
+                        << ",loot=" << (botAI->HasStrategy("loot", BOT_STATE_NON_COMBAT) ? "on" : "off")
+                        << "] moving=" << (member->isMoving() ? "yes" : "no");
+
                 Unit* target = member->GetSelectedUnit();
                 if (target && target != member)
                     compact << " target=" << target->GetNameForLocaleIdx(locale)
@@ -975,13 +1137,15 @@ namespace
             if (i)
                 out << ',';
 
-            out << "{\"source\":\"live\",\"loaded\":true,\"phase_mask\":" << object->GetPhaseMask()
+            out << "{\"source\":\"live\",\"loaded\":true,\"guid\":\""
+                << object->GetGUID().GetRawValue() << "\",\"phase_mask\":" << object->GetPhaseMask()
                 << ",\"line_of_sight\":" << (lineOfSight ? "true" : "false")
                 << ",\"position\":[" << object->GetPositionX() << ',' << object->GetPositionY() << ',' << object->GetPositionZ()
                 << "],\"orientation\":" << object->GetOrientation()
                 << ",\"map_id\":" << object->GetMapId() << ",\"instance_id\":" << object->GetInstanceId()
                 << ",\"distance\":" << nearbyRecords[i].distance
-                << ",\"nearest_member\":\"" << JsonEscape(nearest->GetName()) << "\"";
+                << ",\"nearest_member\":\"" << JsonEscape(nearest->GetName())
+                << "\",\"nearest_member_guid\":\"" << nearest->GetGUID().GetRawValue() << "\"";
 
             if (creature)
             {
@@ -997,14 +1161,48 @@ namespace
                     << ",\"is_trigger\":" << (creature->IsTrigger() ? "true" : "false")
                     << ",\"npc_roles\":";
                 AppendNpcRolesJson(out, npcRoles);
+                if (creature->IsQuestGiver())
+                {
+                    out << ",\"quest_dialog_by_member\":[";
+                    bool firstQuestStatus = true;
+                    for (Player* questMember : context.members)
+                    {
+                        if (!questMember || !questMember->IsInWorld()
+                            || questMember->GetMapId() != creature->GetMapId()
+                            || questMember->GetInstanceId() != creature->GetInstanceId()
+                            || !questMember->InSamePhase(creature))
+                            continue;
+
+                        QuestGiverStatus const status = questMember->GetQuestDialogStatus(creature);
+                        if (!firstQuestStatus)
+                            out << ',';
+                        firstQuestStatus = false;
+                        out << "{\"member\":\"" << JsonEscape(questMember->GetName())
+                            << "\",\"member_guid\":\"" << questMember->GetGUID().GetRawValue()
+                            << "\",\"status\":\"" << QuestDialogStatusName(status)
+                            << "\",\"status_id\":" << unsigned(status)
+                            << ",\"distance\":" << questMember->GetDistance(creature)
+                            << ",\"line_of_sight\":" << (questMember->IsWithinLOSInMap(creature) ? "true" : "false")
+                            << '}';
+                    }
+                    out << ']';
+                }
                 out << ",\"health_pct\":" << creature->GetHealthPct()
                     << ",\"alive\":" << (creature->IsAlive() ? "true" : "false")
                     << ",\"in_combat\":" << (creature->IsInCombat() ? "true" : "false")
                     << ",\"hostile_to_nearest_member\":" << (creature->IsHostileTo(nearest) ? "true" : "false")
                     << ",\"attackable_by_nearest_member\":" << (attackableByNearestMember ? "true" : "false")
-                    << ",\"victim\":\"" << JsonEscape(creature->GetVictim() ? creature->GetVictim()->GetNameForLocaleIdx(locale) : "") << '"';
+                    << ",\"victim\":\"" << JsonEscape(creature->GetVictim() ? creature->GetVictim()->GetNameForLocaleIdx(locale) : "") << '"'
+                    << ",\"controller\":";
+                if (Unit* controller = creature->GetCharmerOrOwner())
+                    out << "{\"guid\":\"" << controller->GetGUID().GetRawValue()
+                        << "\",\"name\":\"" << JsonEscape(controller->GetNameForLocaleIdx(locale)) << "\"}";
+                else
+                    out << "null";
             }
             else if (GameObject* gameObject = object->ToGameObject())
+            {
+                ObjectGuid const ownerGuid = gameObject->GetOwnerGUID();
                 out << ",\"type\":\"gameobject\",\"name\":\"" << JsonEscape(gameObject->GetNameForLocaleIdx(locale))
                     << "\",\"entry\":" << gameObject->GetEntry()
                     << ",\"state\":" << unsigned(gameObject->GetGoState())
@@ -1012,7 +1210,17 @@ namespace
                     << ",\"fishing_node\":" << (gameObject->GetGoType() == GAMEOBJECT_TYPE_FISHINGNODE ? "true" : "false")
                     << ",\"fishing_hole\":" << (gameObject->GetGoType() == GAMEOBJECT_TYPE_FISHINGHOLE ? "true" : "false")
                     << ",\"loot_state_id\":" << unsigned(gameObject->getLootState())
-                    << ",\"spawned\":" << (gameObject->isSpawned() ? "true" : "false");
+                    << ",\"spawned\":" << (gameObject->isSpawned() ? "true" : "false")
+                    << ",\"owner\":";
+                if (!ownerGuid.IsEmpty())
+                {
+                    Unit* owner = ObjectAccessor::GetUnit(*gameObject, ownerGuid);
+                    out << "{\"guid\":\"" << ownerGuid.GetRawValue()
+                        << "\",\"name\":\"" << JsonEscape(owner ? owner->GetNameForLocaleIdx(locale) : "") << "\"}";
+                }
+                else
+                    out << "null";
+            }
             else
                 out << ",\"type\":\"world_object\",\"entry\":" << object->GetEntry();
             out << '}';
@@ -1064,6 +1272,48 @@ namespace
         return out.str();
     }
 
+    std::unordered_map<uint32, std::string> CaptureQuestProgress(Player* player)
+    {
+        std::unordered_map<uint32, std::string> progress;
+        if (!player)
+            return progress;
+
+        QuestStatusMap const& statuses = player->getQuestStatusMap();
+        for (uint8 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+        {
+            uint32 const questId = player->GetQuestSlotQuestId(slot);
+            if (!questId)
+                continue;
+
+            auto status = statuses.find(questId);
+            QuestStatusData const* data = status == statuses.end() ? nullptr : &status->second;
+            Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+            std::ostringstream payload;
+            payload << "{\"quest_id\":" << questId
+                << ",\"title\":\"" << JsonEscape(quest ? quest->GetTitle() : "Unknown")
+                << "\",\"status\":" << unsigned(data ? data->Status : QUEST_STATUS_NONE)
+                << ",\"item_progress\":[";
+            for (uint8 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
+            {
+                if (i)
+                    payload << ',';
+                payload << (data ? data->ItemCount[i] : 0);
+            }
+            payload << "],\"creature_progress\":[";
+            for (uint8 i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
+            {
+                if (i)
+                    payload << ',';
+                payload << (data ? data->CreatureOrGOCount[i] : 0);
+            }
+            payload << ']';
+            AppendQuestObjectiveDetails(payload, quest, data);
+            payload << ",\"explored\":" << (data && data->Explored ? "true" : "false") << '}';
+            progress.emplace(questId, payload.str());
+        }
+        return progress;
+    }
+
     void TrackMemberTransitions(GroupContext const& context)
     {
         GroupSequence& sequence = groupSequences[context.key];
@@ -1073,6 +1323,8 @@ namespace
                 continue;
 
             Unit* target = player->GetSelectedUnit();
+            if (target == player)
+                target = nullptr;
             PlayerDelta current;
             current.mapId = player->GetMapId();
             current.instanceId = player->GetInstanceId();
@@ -1080,6 +1332,7 @@ namespace
             current.targetGuid = target ? target->GetGUID().GetRawValue() : 0;
             current.inCombat = player->IsInCombat();
             current.healthBand = static_cast<uint8>(std::min<unsigned>(3, unsigned(player->GetHealthPct()) / 25));
+            current.questProgress = CaptureQuestProgress(player);
 
             uint64 const playerGuid = player->GetGUID().GetRawValue();
             auto previous = sequence.players.find(playerGuid);
@@ -1108,8 +1361,22 @@ namespace
                     current.zoneId, payload.str(), "instance=" + std::to_string(current.instanceId));
             }
             if (old.inCombat != current.inCombat)
+            {
+                std::ostringstream payload;
+                payload << "{\"target_guid\":" << current.targetGuid;
+                if (target)
+                    payload << ",\"target_name\":\"" << JsonEscape(target->GetNameForLocaleIdx(sWorld->GetDefaultDbcLocale())) << '"';
+                payload << '}';
                 PublishEvent(context, current.inCombat ? "combat_start" : "combat_end", player->GetName(), current.mapId,
-                    current.instanceId, current.zoneId, "{}", current.inCombat ? "entered combat" : "left combat");
+                    current.instanceId, current.zoneId, payload.str(), current.inCombat ? "entered combat" : "left combat");
+            }
+            for (auto const& quest : current.questProgress)
+            {
+                auto previousQuest = old.questProgress.find(quest.first);
+                if (previousQuest == old.questProgress.end() || previousQuest->second != quest.second)
+                    PublishEvent(context, "quest_progress", player->GetName(), current.mapId, current.instanceId,
+                        current.zoneId, quest.second, "quest=" + std::to_string(quest.first) + " objectives changed");
+            }
             if (old.healthBand != current.healthBand)
             {
                 std::ostringstream payload;
@@ -1121,7 +1388,8 @@ namespace
         }
     }
 
-    void PublishNearbyObjectEvent(WorldObject* object, std::string const& type, std::string const& detail)
+    void PublishNearbyObjectEvent(WorldObject* object, std::string const& type, std::string const& detail,
+        std::string const& extraPayload = "")
     {
         if (!object)
             return;
@@ -1145,7 +1413,10 @@ namespace
         payload << "{\"object_type\":\"" << objectType << "\",\"entry\":" << object->GetEntry()
             << ",\"name\":\"" << JsonEscape(objectName) << "\",\"phase_mask\":" << phaseMask
             << ",\"map_id\":" << mapId << ",\"instance_id\":" << instanceId
-            << ",\"position\":[" << x << ',' << y << ',' << z << "]}";
+            << ",\"position\":[" << x << ',' << y << ',' << z << ']';
+        if (!extraPayload.empty())
+            payload << ',' << extraPayload;
+        payload << '}';
         PendingObservedEvent event;
         event.subjectGuid = objectGuid;
         event.mapId = mapId;
@@ -1283,6 +1554,8 @@ namespace
                 return;
             _elapsed %= interval;
 
+            UpdatePendingTypedActions();
+
             uint32 maxObjects = sConfigMgr->GetOption<uint32>("ClaudeBridge.TelemetryMaxObjects", DEFAULT_MAX_NEARBY_OBJECTS);
             maxObjects = std::max<uint32>(1, std::min<uint32>(maxObjects, 500));
             float radius = sConfigMgr->GetOption<float>("ClaudeBridge.TelemetryRadius", DEFAULT_TELEMETRY_RADIUS);
@@ -1345,14 +1618,18 @@ namespace
 
         void OnPlayerPVPKill(Player* killer, Player* killed) override
         {
-            PublishPlayerEvent(killer, "pvp_kill", "{\"target\":\"" + JsonEscape(killed ? killed->GetName() : "") + "\"}",
+            PublishPlayerEvent(killer, "pvp_kill", "{\"target_guid\":" +
+                std::to_string(killed ? killed->GetGUID().GetRawValue() : 0) + ",\"target\":\"" +
+                JsonEscape(killed ? killed->GetName() : "") + "\"}",
                 killed ? "killed=" + killed->GetName() : "");
         }
 
         void OnPlayerCreatureKillCredit(Player* player, Creature* killed) override
         {
+            RecordAgentHuntKill(player, killed);
             PublishPlayerEvent(player, "creature_kill_credit",
-                "{\"entry\":" + std::to_string(killed ? killed->GetEntry() : 0) + ",\"name\":\"" +
+                "{\"target_guid\":" + std::to_string(killed ? killed->GetGUID().GetRawValue() : 0) +
+                    ",\"entry\":" + std::to_string(killed ? killed->GetEntry() : 0) + ",\"name\":\"" +
                     JsonEscape(killed ? killed->GetName() : "") + "\"}",
                 killed ? "killed=" + killed->GetName() : "");
         }
@@ -1362,8 +1639,14 @@ namespace
             SpellInfo const* info = spell ? spell->GetSpellInfo() : nullptr;
             if (!info)
                 return;
+            LocaleConstant const locale = sWorld->GetDefaultDbcLocale();
+            char const* spellName = info->SpellName[locale];
+            if (!spellName || !spellName[0])
+                spellName = info->SpellName[0];
             PublishPlayerEvent(player, "spell_cast", "{\"spell_id\":" + std::to_string(info->Id) +
-                ",\"skip_check\":" + (skipCheck ? "true" : "false") + "}", "spell_id=" + std::to_string(info->Id));
+                ",\"spell_name\":\"" + JsonEscape(spellName ? spellName : "") + "\",\"skip_check\":" +
+                (skipCheck ? "true" : "false") + "}", "spell=" + std::string(spellName ? spellName : "unknown") +
+                "#" + std::to_string(info->Id));
         }
 
         void OnPlayerMapChanged(Player* player) override
@@ -1395,11 +1678,13 @@ namespace
                     std::to_string(item->GetEntry()) + "}", "unequipped=" + std::to_string(item->GetEntry()));
         }
 
-        void OnPlayerLootItem(Player* player, Item* item, uint32 count, ObjectGuid /*lootguid*/) override
+        void OnPlayerLootItem(Player* player, Item* item, uint32 count, ObjectGuid lootGuid) override
         {
+            RecordAgentHuntLoot(player, item, count, lootGuid.GetRawValue());
             if (player && item)
                 PublishPlayerEvent(player, "loot_item", "{\"entry\":" + std::to_string(item->GetEntry()) +
-                    ",\"count\":" + std::to_string(count) + "}",
+                    ",\"count\":" + std::to_string(count) + ",\"loot_guid\":" +
+                    std::to_string(lootGuid.GetRawValue()) + "}",
                     "loot=" + std::to_string(item->GetEntry()) + " x" + std::to_string(count));
         }
 
@@ -1427,7 +1712,10 @@ namespace
             if (player && skill == SKILL_FISHING)
                 PublishPlayerEvent(player, "fishing_skill_roll", "{\"skill\":" + std::to_string(skill) +
                     ",\"zone_skill\":" + std::to_string(zoneSkill) + ",\"chance\":" + std::to_string(chance) +
-                    ",\"roll\":" + std::to_string(roll) + "}", "fishing skill roll");
+                    ",\"roll\":" + std::to_string(roll) + ",\"catch_success\":" +
+                    (chance >= roll ? "true" : "false") + ",\"outcome\":\"" +
+                    (chance >= roll ? "catch" : "junk") + "\"}",
+                    chance >= roll ? "fishing catch roll succeeded" : "fishing catch roll failed; junk loot");
             return true;
         }
 
@@ -1453,7 +1741,9 @@ namespace
         {
             if (Creature* creature = unit ? unit->ToCreature() : nullptr)
                 PublishNearbyObjectEvent(creature, "creature_combat_start",
-                    victim ? "victim=" + victim->GetName() : "victim=unknown");
+                    victim ? "victim=" + victim->GetName() : "victim=unknown",
+                    victim ? "\"victim_guid\":" + std::to_string(victim->GetGUID().GetRawValue()) +
+                        ",\"victim_name\":\"" + JsonEscape(victim->GetNameForLocaleIdx(sWorld->GetDefaultDbcLocale())) + "\"" : "");
         }
 
         void OnUnitExitCombat(Unit* unit) override
@@ -1462,10 +1752,12 @@ namespace
                 PublishNearbyObjectEvent(creature, "creature_combat_end", "left combat");
         }
 
-        void OnUnitDeath(Unit* unit, Unit* /*killer*/) override
+        void OnUnitDeath(Unit* unit, Unit* killer) override
         {
             if (Creature* creature = unit ? unit->ToCreature() : nullptr)
-                PublishNearbyObjectEvent(creature, "creature_death", "died");
+                PublishNearbyObjectEvent(creature, "creature_death", "died",
+                    killer ? "\"killer_guid\":" + std::to_string(killer->GetGUID().GetRawValue()) +
+                        ",\"killer_name\":\"" + JsonEscape(killer->GetName()) + "\"" : "");
         }
     };
 
@@ -1503,16 +1795,106 @@ namespace
         void OnGameObjectStateChanged(GameObject* object, uint32 state) override
         {
             if (object)
-                PublishNearbyObjectEvent(object, "gameobject_state", "state=" + std::to_string(state));
+                PublishNearbyObjectEvent(object, "gameobject_state", "state=" + std::to_string(state),
+                    "\"state\":" + std::to_string(state));
         }
 
         void OnGameObjectLootStateChanged(GameObject* object, uint32 state, Unit* unit) override
         {
             if (object)
                 PublishNearbyObjectEvent(object, "gameobject_loot_state", "state=" + std::to_string(state) +
-                    (unit ? " unit=" + unit->GetName() : ""));
+                    (unit ? " unit=" + unit->GetName() : ""),
+                    "\"loot_state\":" + std::to_string(state) + (unit
+                        ? ",\"unit_guid\":" + std::to_string(unit->GetGUID().GetRawValue()) +
+                            ",\"unit_name\":\"" + JsonEscape(unit->GetName()) + "\""
+                        : ""));
         }
     };
+}
+
+void PublishActionResultEvent(Player* requester, std::string const& actorName,
+    std::string const& actionId, std::string const& actionType,
+    std::string const& status, std::string const& reasonCode)
+{
+    if (!requester || !requester->IsInWorld() || !requester->GetGroup()
+        || (status != "accepted" && status != "rejected"))
+        return;
+
+    Group* group = requester->GetGroup();
+    bool hasBridgeBot = false;
+    for (GroupReference* itr = group->GetFirstMember(); itr; itr = itr->next())
+        if (Player* member = itr->GetSource(); member && member->IsInWorld() && IsBridgeBot(member->GetName()))
+        {
+            hasBridgeBot = true;
+            break;
+        }
+    if (!hasBridgeBot)
+        return;
+
+    std::string const groupKey = MakeGroupKey(group, requester);
+    std::string const eventType = status == "accepted" ? "action_accepted" : "action_rejected";
+    std::string const payload = "{\"action_id\":\"" + JsonEscape(actionId)
+        + "\",\"action\":\"" + JsonEscape(actionType)
+        + "\",\"status\":\"" + JsonEscape(status)
+        + "\",\"reason_code\":\"" + JsonEscape(reasonCode) + "\"}";
+    std::string const detail = "action_id=" + actionId + " action=" + actionType
+        + " status=" + status + " reason=" + reasonCode;
+    PublishEvent(groupKey, eventType, actorName, requester->GetMapId(), requester->GetInstanceId(),
+        requester->GetZoneId(), payload, detail);
+}
+
+void PublishNpcDialogEvent(Player* actor, std::string const& actionId)
+{
+    if (!actor || !actor->IsInWorld() || !actor->GetGroup() || !actor->PlayerTalkClass
+        || actionId.size() != 32)
+        return;
+
+    GossipMenu const& gossip = actor->PlayerTalkClass->GetGossipMenu();
+    QuestMenu const& quests = actor->PlayerTalkClass->GetQuestMenu();
+    ObjectGuid const sourceGuid = gossip.GetSenderGUID();
+    Creature* source = sourceGuid ? ObjectAccessor::GetCreature(*actor, sourceGuid) : nullptr;
+    if (!source || source->GetMap() != actor->GetMap() || !actor->InSamePhase(source))
+        return;
+
+    LocaleConstant locale = sWorld->GetDefaultDbcLocale();
+    std::ostringstream payload;
+    payload << "{\"action_id\":\"" << JsonEscape(actionId)
+        << "\",\"target_guid\":\"" << sourceGuid.GetRawValue()
+        << "\",\"npc\":\"" << JsonEscape(source->GetNameForLocaleIdx(locale))
+        << "\",\"menu_id\":" << gossip.GetMenuId() << ",\"options\":[";
+    bool first = true;
+    for (auto const& [index, item] : gossip.GetMenuItems())
+    {
+        if (!first)
+            payload << ',';
+        first = false;
+        payload << "{\"option_index\":" << index
+            << ",\"text\":\"" << JsonEscape(item.Message.substr(0, 256))
+            << "\",\"coded\":" << (item.IsCoded ? "true" : "false")
+            << ",\"money\":" << item.BoxMoney
+            << ",\"option_type\":" << item.OptionType << '}';
+    }
+    payload << "],\"quests\":[";
+    for (uint8 i = 0; i < quests.GetMenuItemCount(); ++i)
+    {
+        if (i)
+            payload << ',';
+        uint32 const questId = quests.GetItem(i).QuestId;
+        Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+        payload << "{\"quest_id\":" << questId
+            << ",\"title\":\"" << JsonEscape(quest ? quest->GetTitle() : "Unknown quest")
+            << "\",\"status\":" << unsigned(actor->GetQuestStatus(questId)) << '}';
+    }
+    payload << "]}";
+
+    Group* group = actor->GetGroup();
+    std::string const groupKey = MakeGroupKey(group, actor);
+    std::string const detail = "action_id=" + actionId + " npc=" + source->GetNameForLocaleIdx(locale)
+        + " menu_id=" + std::to_string(gossip.GetMenuId())
+        + " gossip_options=" + std::to_string(gossip.GetMenuItemCount())
+        + " quest_options=" + std::to_string(quests.GetMenuItemCount());
+    PublishEvent(groupKey, "npc_dialog", actor->GetName(), actor->GetMapId(), actor->GetInstanceId(),
+        actor->GetZoneId(), payload.str(), detail);
 }
 
 std::string GetWorldChatContext(Player const* player)

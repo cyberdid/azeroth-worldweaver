@@ -11,13 +11,14 @@ BRIDGE = runpy.run_path(str(BRIDGE_PATH), run_name="codex_bridge_under_test")
 
 
 class CodexImagePromptTests(unittest.TestCase):
-    def test_image_argument_follows_prompt_so_cli_receives_prompt(self):
+    def test_prompt_is_sent_through_stdin_and_image_argument_is_preserved(self):
         prompt = "Describe this WoW screenshot."
         image_path = "/tmp/wow-frame.png"
         observed = {}
 
         def fake_codex(command, **_kwargs):
             observed["command"] = command
+            observed["input"] = _kwargs["input"]
             output_path = pathlib.Path(command[command.index("-o") + 1])
             output_path.write_text("Visible scene.", encoding="utf-8")
             return subprocess.CompletedProcess(command, 0)
@@ -29,7 +30,8 @@ class CodexImagePromptTests(unittest.TestCase):
 
         command = observed["command"]
         self.assertEqual(reply, "Visible scene.")
-        self.assertLess(command.index(prompt), command.index("-i"))
+        self.assertEqual(observed["input"], prompt)
+        self.assertEqual(command[command.index("-") + 1], "-i")
         self.assertEqual(command[command.index("-i") + 1], image_path)
 
 
