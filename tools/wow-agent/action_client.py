@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import subprocess
 import time
@@ -26,8 +27,16 @@ ALLOWED_ACTIONS = frozenset({
     "cast_spell",
     "use_item",
     "equip_item",
+    "vendor_travel",
+    "vendor_travel_cancel",
+    "vendor_inspect",
+    "vendor_buy",
+    "vendor_task_start",
+    "vendor_task_cancel",
+    "trainer_task_start",
     "interact_npc",
     "gossip_select",
+    "trainer_action",
     "offer_items",
     "hunt_start",
     "hunt_cancel",
@@ -37,6 +46,13 @@ ALLOWED_ACTIONS = frozenset({
     "playerbot_action",
 })
 ACTION_REQUIRED_FIELDS = {
+    "vendor_travel": frozenset({"map_id", "position", "purchase_reserve_copper"}),
+    "vendor_travel_cancel": frozenset(),
+    "vendor_inspect": frozenset({"target_guid"}),
+    "vendor_buy": frozenset({"target_guid", "item_entry", "quantity", "max_total_copper"}),
+    "vendor_task_start": frozenset({"item_entry", "quantity", "max_total_copper"}),
+    "vendor_task_cancel": frozenset(),
+    "trainer_task_start": frozenset({"trainer_entry", "map_id", "position"}),
     "follow": frozenset(),
     "stay": frozenset(),
     "attack_master_target": frozenset(),
@@ -51,6 +67,7 @@ ACTION_REQUIRED_FIELDS = {
     "equip_item": frozenset({"item_entry", "bag", "slot"}),
     "interact_npc": frozenset({"target_guid"}),
     "gossip_select": frozenset({"target_guid", "option_index"}),
+    "trainer_action": frozenset({"target_guid", "learn"}),
     "offer_items": frozenset({"items"}),
     "hunt_start": frozenset({"map_id", "zone_id", "kill_count", "deliver_loot"}),
     "hunt_cancel": frozenset(),
@@ -60,6 +77,9 @@ ACTION_REQUIRED_FIELDS = {
     "playerbot_action": frozenset({"action_name"}),
 }
 ACTION_OPTIONAL_FIELDS = {
+    "vendor_buy": frozenset({"allow_extended_cost"}),
+    "vendor_task_start": frozenset({"allow_extended_cost", "return_to_user"}),
+    "trainer_task_start": frozenset({"learn"}),
     "cast_spell": frozenset({"target_guid"}),
     "hunt_start": frozenset({"creature_entry", "creature_entries", "area_id", "collect_loot"}),
     "guide_start": frozenset({"creature_entry", "creature_entries", "area_id"}),
@@ -67,7 +87,7 @@ ACTION_OPTIONAL_FIELDS = {
 }
 MAX_ACTION_LINE_CHARS = 4096
 ACTION_TIMEOUT_SECONDS = 10
-_ACTION_LINE = re.compile(r"^\s*ACTION:\s*(.*?)\s*$")
+_ACTION_MARKER = re.compile(r"\bACTION\s*:", re.IGNORECASE)
 _SAFE_CHARACTER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,11}$")
 _ACTION_ID = re.compile(r"^[0-9a-f]{32}$")
 _ITEM_HANDOFF_INTENT = re.compile(
@@ -148,6 +168,71 @@ def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise ValueError("duplicate_key")
         result[key] = value
     return result
+
+
+def _extract_action_directives(
+    response: str,
+) -> tuple[str, list[tuple[Any, str | None, int]]]:
+    """Remove every ACTION payload, including inline and fenced JSON, before speech."""
+    decoder = json.JSONDecoder(object_pairs_hook=_strict_object)
+    spans: list[tuple[int, int]] = []
+    directives: list[tuple[Any, str | None, int]] = []
+    cursor = 0
+    while match := _ACTION_MARKER.search(response, cursor):
+        start = match.start()
+        payload_start = match.end()
+        while payload_start < len(response) and response[payload_start].isspace():
+            payload_start += 1
+
+        fenced = response.startswith("```", payload_start)
+        if fenced:
+            fence_match = re.match(r"```(?:json)?[ \t]*(?:\r?\n)?", response[payload_start:], re.IGNORECASE)
+            if fence_match:
+                payload_start += fence_match.end()
+                while payload_start < len(response) and response[payload_start].isspace():
+                    payload_start += 1
+
+        value: Any = None
+        error: str | None = None
+        try:
+            value, end = decoder.raw_decode(response, payload_start)
+        except (json.JSONDecodeError, ValueError):
+            # If the payload is malformed, discard the rest of the draft; no internal
+            # protocol fragment or explanation may be forwarded as player speech.
+            end = len(response)
+            error = "invalid_action_json"
+
+        # Consume a closing markdown fence, but keep any natural-language text after it.
+        trailing = end
+        while trailing < len(response) and response[trailing] in " \t\r\n":
+            trailing += 1
+        if fenced and response.startswith("```", trailing):
+            end = trailing + 3
+            if response[end:end + 2] == "\r\n":
+                end += 2
+            elif response[end:end + 1] == "\n":
+                end += 1
+        elif error is not None and end < len(response) and response[end:end + 3] == "```":
+            end += 3
+
+        size = end - start
+        if size > MAX_ACTION_LINE_CHARS and error is None:
+            error = "action_too_large"
+            value = None
+        spans.append((start, end))
+        directives.append((value, error, size))
+        cursor = max(end, match.end())
+
+    if not spans:
+        return response.strip(), []
+
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        pieces.append(response[cursor:start])
+        cursor = end
+    pieces.append(response[cursor:])
+    return "".join(pieces).strip(), directives
 
 
 def _valid_guid(value: Any) -> bool:
@@ -335,43 +420,59 @@ def _encode_playerbot_action(action: dict[str, Any]) -> str:
     return "p" + name.encode("ascii").hex() + "." + qualifier.encode("utf-8").hex()
 
 
+def _encode_vendor_travel(action: dict[str, Any]) -> str:
+    for key, maximum in (("map_id",65535),("purchase_reserve_copper",0xFFFFFFFF)):
+        value=action.get(key)
+        if not isinstance(value,int) or isinstance(value,bool) or not 0<=value<=maximum:
+            raise ValueError("invalid_vendor_"+key)
+    position=action.get("position")
+    if not isinstance(position,list) or len(position)!=3 or any(
+            not isinstance(v,(int,float)) or isinstance(v,bool) or not math.isfinite(v) or abs(v)>100000 for v in position):
+        raise ValueError("invalid_vendor_position")
+    return f"r:{action['map_id']}:{':'.join(format(v,'.6f') for v in position)}:{action['purchase_reserve_copper']}"
+
+
+def _encode_vendor_purchase(action: dict[str, Any]) -> str:
+    for key, maximum in (("item_entry", 0xFFFFFFFF), ("quantity", 0xFFFF), ("max_total_copper", 0xFFFFFFFF)):
+        value = action.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or not (0 if key == "max_total_copper" else 1) <= value <= maximum:
+            raise ValueError("invalid_vendor_" + key)
+    for key in ("allow_extended_cost", "return_to_user"):
+        if key in action and not isinstance(action[key], bool):
+            raise ValueError("invalid_vendor_" + key)
+    return f"v:{action['item_entry']}:{action['quantity']}:{action['max_total_copper']}:{int(action.get('allow_extended_cost', False))}"
+
+
+def _validate_trainer_task(action: dict[str, Any]) -> None:
+    entry = action.get("trainer_entry")
+    if not isinstance(entry, int) or isinstance(entry, bool) or not 0 < entry <= 0xFFFFFF:
+        raise ValueError("invalid_trainer_entry")
+    if "learn" in action and not isinstance(action["learn"], bool):
+        raise ValueError("invalid_trainer_mode")
+    _encode_vendor_travel(dict(action, purchase_reserve_copper=0))
+
+
 def parse_action_response(
     response: str,
     *,
     bot_name: str,
     allow_action: bool = True,
 ) -> tuple[str, dict[str, Any] | None, str | None]:
-    """Remove protocol lines and accept one bounded, action-specific JSON shape."""
+    """Strip internal protocol anywhere in the draft and accept one typed action."""
     if not isinstance(response, str):
         return "", None, "invalid_response"
 
-    lines = response.splitlines()
-    action_lines: list[str] = []
-    reply_lines: list[str] = []
-    for line in lines:
-        if re.match(r"^\s*ACTION\s*:", line):
-            action_lines.append(line)
-        else:
-            reply_lines.append(line)
-    reply = "\n".join(reply_lines).strip()
-
-    if not action_lines:
+    reply, directives = _extract_action_directives(response)
+    if not directives:
         return reply, None, None
     if not allow_action:
         return reply, None, "action_not_authorized"
-    if len(action_lines) != 1:
+    if len(directives) != 1:
         return reply, None, "multiple_actions"
 
-    line = action_lines[0]
-    if len(line) > MAX_ACTION_LINE_CHARS:
-        return reply, None, "action_too_large"
-    match = _ACTION_LINE.fullmatch(line)
-    if not match:
-        return reply, None, "invalid_action_line"
-    try:
-        value = json.loads(match.group(1), object_pairs_hook=_strict_object)
-    except (json.JSONDecodeError, ValueError):
-        return reply, None, "invalid_action_json"
+    value, directive_error, _ = directives[0]
+    if directive_error is not None:
+        return reply, None, directive_error
     if not isinstance(value, dict):
         return reply, None, "invalid_action_shape"
     if not all(isinstance(value.get(key), str) for key in ("actor", "type")):
@@ -395,6 +496,8 @@ def parse_action_response(
                                     or isinstance(value["option_index"], bool)
                                     or not 0 <= value["option_index"] <= 255):
         return reply, None, "invalid_option_index"
+    if value["type"] == "trainer_action" and not isinstance(value["learn"], bool):
+        return reply, None, "invalid_trainer_mode"
     if value["type"] == "offer_items":
         try:
             _validate_offer_selectors(value["items"])
@@ -431,6 +534,21 @@ def parse_action_response(
                 "invalid_creature_entry", "invalid_creature_entries", "duplicate_creature_entry",
                 "invalid_map_id", "invalid_zone_id", "invalid_area_id",
             } else "invalid_guide_request"
+    if value["type"] == "vendor_travel":
+        try:
+            _encode_vendor_travel(value)
+        except ValueError as error:
+            return reply, None, str(error)
+    if value["type"] in {"vendor_buy", "vendor_task_start"}:
+        try:
+            _encode_vendor_purchase(value)
+        except ValueError as error:
+            return reply, None, str(error)
+    if value["type"] == "trainer_task_start":
+        try:
+            _validate_trainer_task(value)
+        except ValueError as error:
+            return reply, None, str(error)
     if value["type"] == "playerbot_action":
         try:
             _encode_playerbot_action(value)
@@ -484,8 +602,18 @@ def build_action_command(
                                      or isinstance(option_index, bool)
                                      or not 0 <= option_index <= 255):
         raise ValueError("invalid_option_index")
-    if action_type == "offer_items":
+    if action_type == "trainer_action" and not isinstance(action["learn"], bool):
+        raise ValueError("invalid_trainer_mode")
+    if action_type in {"vendor_task_start", "vendor_task_cancel", "trainer_task_start"}:
+        raise ValueError("bridge_local_action")
+    if action_type == "vendor_travel":
+        task_token = _encode_vendor_travel(action)
+    elif action_type == "vendor_buy":
+        task_token = _encode_vendor_purchase(action)
+    elif action_type == "offer_items":
         item_offer_token = _encode_item_offers(action["items"])
+    elif action_type == "trainer_action":
+        task_token = "learn" if action["learn"] else "inspect"
     elif action_type in {"use_item", "equip_item"}:
         item_offer_token = _encode_item_location(action)
     elif action_type == "hunt_start":

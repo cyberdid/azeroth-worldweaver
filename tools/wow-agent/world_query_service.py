@@ -20,7 +20,7 @@ _QUERY = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_QUERY)
 
 _REQUEST_NAME = re.compile(r"^([0-9a-f]{32})\.request\.json$")
-_OPERATIONS = {"creature", "gameobject", "spawns", "quest", "fishing", "loot", "item", "spell"}
+_OPERATIONS = {"creature", "gameobject", "spawns", "quest", "fishing", "loot", "item", "spell", "vendors"}
 _ARGUMENTS = {
     "creature": {"entry", "name", "limit"},
     "gameobject": {"entry", "name", "limit"},
@@ -30,6 +30,7 @@ _ARGUMENTS = {
     "loot": {"kind", "entry", "limit"},
     "item": {"entry", "name", "limit"},
     "spell": {"id", "name", "limit"},
+    "vendors": {"item_id", "name", "entry", "map_id", "limit", "offset"},
 }
 _MAX_REQUEST_BYTES = 4096
 _MAX_AGE_SECONDS = 300
@@ -60,7 +61,7 @@ def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
 
 
 def _error_result(operation: str, code: str) -> dict[str, Any]:
-    provenance = "static_spawn" if operation == "spawns" else "mixed_static" if operation == "fishing" else "static_template"
+    provenance = "static_spawn" if operation in {"spawns", "vendors"} else "mixed_static" if operation == "fishing" else "static_template"
     return {"operation": operation, "provenance": provenance, "results": [], "truncated": False, "error": code}
 
 

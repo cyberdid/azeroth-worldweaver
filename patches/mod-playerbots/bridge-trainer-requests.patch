@@ -1,0 +1,51 @@
+diff --git a/src/Ai/Base/Actions/TrainerAction.cpp b/src/Ai/Base/Actions/TrainerAction.cpp
+index d4465a0..2a50bba 100644
+--- a/src/Ai/Base/Actions/TrainerAction.cpp
++++ b/src/Ai/Base/Actions/TrainerAction.cpp
+@@ -32,10 +32,11 @@ bool TrainerAction::Execute(Event event)
+     // spells as parameters, check SkipSpellsListAction::parseIds as an example.
+     uint32 spellId = chat->parseSpell(param);
+ 
+-    bool learnSpells = param.find("learn") != std::string::npos || sRandomPlayerbotMgr.IsRandomBot(bot) ||
++    bool const bridgeRequest = param == "inspect" || param == "learn";
++    bool learnSpells = param == "learn" || (!bridgeRequest && (sRandomPlayerbotMgr.IsRandomBot(bot) ||
+                        (sPlayerbotAIConfig.AllowLearnTrainerSpells &&
+                         // TODO: Rewrite to only exclude start primary profession skills and make config dependent.
+-                        (trainer->GetTrainerType() != Trainer::Type::Tradeskill || !IsRealPlayer(botAI->GetMaster())));
++                        (trainer->GetTrainerType() != Trainer::Type::Tradeskill || !IsRealPlayer(botAI->GetMaster())))));
+ 
+     Iterate(target, learnSpells, spellId);
+ 
+@@ -51,7 +52,8 @@ bool TrainerAction::isUseful()
+     if (!target->IsInWorld() || target->IsDuringRemoveFromWorld() || !target->IsAlive())
+         return false;
+ 
+-    return target->IsTrainer();
++    return target->HasNpcFlag(UNIT_NPC_FLAG_TRAINER | UNIT_NPC_FLAG_TRAINER_CLASS
++        | UNIT_NPC_FLAG_TRAINER_PROFESSION);
+ }
+ 
+ bool TrainerAction::isPossible()
+@@ -85,13 +87,18 @@ bool TrainerAction::isPossible()
+ 
+ Unit* TrainerAction::GetTarget()
+ {
+-    // There are just two scenarios: the bot has a master or it doesn't. If the
+-    // bot has a master, the master should target a unit; otherwise, the bot
+-    // should target the unit itself.
++    // Bridge actions select the trainer on the bot. Prefer that live trainer
++    // over the master's unrelated current target.
++    Unit* botTarget = bot->GetSelectedUnit();
++    if (Creature* creature = botTarget ? botTarget->ToCreature() : nullptr)
++        if (creature->HasNpcFlag(UNIT_NPC_FLAG_TRAINER | UNIT_NPC_FLAG_TRAINER_CLASS
++            | UNIT_NPC_FLAG_TRAINER_PROFESSION))
++            return botTarget;
++
+     if (Player* master = GetMaster())
+         return master->GetSelectedUnit();
+ 
+-    return bot->GetSelectedUnit();
++    return botTarget;
+ }
+ 
+ Creature* TrainerAction::GetCreatureTarget()

@@ -145,7 +145,7 @@ def _read_snapshot(
         captured_ms = snapshot.get("captured_at_unix_ms")
         if not isinstance(captured_ms, int):
             captured_ms = int(float(snapshot.get("captured_at", 0)) * 1000)
-        age = max(0.0, (time.time() * 1000 - captured_ms) / 1000)
+        age = (time.time() * 1000 - captured_ms) / 1000
         return (snapshot.get("snapshot_seq"), snapshot.get("session_id"), round(age, 3),
                 snapshot.get("group_id"))
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError, OverflowError):
@@ -358,10 +358,13 @@ def _capture_game_window(
             cached["current_group_id"] = current_group_id
             cached["current_snapshot_age_seconds"] = current_snapshot_age
             cached["checked_at"] = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime())
+            cached["clock_skew"] = (current_snapshot_age is not None
+                                    and current_snapshot_age < -5.0)
             cached["stale"] = (previous.get("capture_session_id") != current_session
                                or previous.get("capture_group_id") != current_group_id
                                or current_snapshot_seq is None or current_snapshot_age is None
                                or age > max(5.0, min_interval_seconds)
+                               or current_snapshot_age < -5.0
                                or current_snapshot_age > 5.0)
             cached["reason"] = "reused recent capture after verifying the current WoW window"
             try:
@@ -425,8 +428,9 @@ def _capture_game_window(
         "group_id": current_group_id,
         "capture_group_id": current_group_id,
         "world_snapshot_age_seconds": current_snapshot_age,
+        "clock_skew": (current_snapshot_age is not None and current_snapshot_age < -5.0),
         "stale": (current_snapshot_seq is None or current_snapshot_age is None
-                  or current_snapshot_age > 5.0),
+                  or current_snapshot_age < -5.0 or current_snapshot_age > 5.0),
         "cached": False,
     }
     try:

@@ -30,6 +30,7 @@ This repository is the source and integration package for that experiment. It do
 | Loot and trade | Gathered items remain in the bot's bags. Delivery is a separate request: the bridge offers only requested, tradeable items through WoW's normal trade window; the player confirms. Whole-stack requests are resolved from current inventory. |
 | Character actions | Follow/stay, attack the player's target or a valid nearby target, cast a known spell, use/equip a carried item, fish, interact with an NPC, and select an option from a server-reported NPC menu, subject to normal game checks. |
 | Guides | Walk to a useful creature spawn on the same world map and wait for the player to catch up. The route helper does not teleport or cross maps. |
+| Vendors and trainers | Travel to a static NPC on foot, by known paid flight path, or by ordinary ship/portal transitions. A purchase task finds a vendor that stocks an item, inspects live stock, buys exactly the requested amount within a budget, and returns. A trainer task walks to the trainer, stays there, learns (or only inspects), resumes following and reports the skill change or the concrete reason, such as nothing to learn yet. |
 | Static references | Bounded, read-only lookups for creatures, quests, fishing, loot, items, spells, and spawns. Static database rows are distinguished from live observations. |
 | Optional visual context | A verified active WoW-window image is captured only when requested. No background or whole-desktop capture. |
 
@@ -45,6 +46,7 @@ Give tasks in your own words, for example:
 - “Claude, підійди до найближчого місця з Tangy Clam Meat і покажи мені дорогу.”
 - “Передай мені весь Thick-shelled Clam.”
 - “Codex, застосуй Healing Wave до Claude.”
+- “Claude, піди до тренера першої допомоги в Айронфорджі й навчись.”
 
 The model resolves the request against fresh context and supported actions. When details are ambiguous, it can ask a follow-up. A request is not proof that an action succeeded: the bridge reports accepted/rejected results and observed progress. NPC options depend on what the server exposes at that moment; this is not a claim that every quest, trainer, or scripted NPC flow is automated.
 
@@ -63,7 +65,7 @@ World telemetry is server context, not a live video feed. It only describes load
 modules/mod-claude-bridge/   AzerothCore module: shared observer, writer, typed action dispatcher
 tools/wow-agent/            Claude/Codex adapters, memory, queries, action and window clients
 patches/azerothcore/         small compatibility accessor patch
-patches/mod-playerbots/      hunt-target integration patch
+patches/mod-playerbots/      hunt-target and bridge trainer-request patches
 assets/                      original SVG illustrations
  docs/design/                architecture and action specifications
  tests/                      adapter and observer unit tests
@@ -82,7 +84,7 @@ assets/                      original SVG illustrations
 This is an integration package for people already operating AzerothCore; it is not a one-click installer. Back up your source tree and database before changing your own server. Never copy private runtime files into this repository.
 
 1. Add `modules/mod-claude-bridge/` to the AzerothCore source tree's `modules/` directory.
-2. Apply `patches/azerothcore/combined-phase-mask-accessor.patch` to the core and `patches/mod-playerbots/task-hunt-targets.patch` to the matching mod-playerbots checkout. The latter adds bounded target filtering used by hunt tasks.
+2. Apply `patches/azerothcore/combined-phase-mask-accessor.patch` to the core and `patches/mod-playerbots/task-hunt-targets.patch` plus `patches/mod-playerbots/bridge-trainer-requests.patch` to the matching mod-playerbots checkout. They add bounded target filtering used by hunt tasks and let bridge trainer requests use the bot's selected trainer.
 3. Re-run CMake configuration, build and install the worldserver using your established AzerothCore procedure. Add `conf/claude_bridge.conf.dist` settings to your local module configuration; set both bot names and the telemetry/log paths appropriate to your host.
 4. Install `tools/wow-agent/` and the two shell helpers beside your local server runtime. Provide SOAP URL and a mode-`0600` credential file (`username:password`) through local environment variables. The examples contain no credentials.
 5. Start one adapter per bot with the same explicit `WOW_AGENT_AUTHORIZED_PLAYERS` allowlist and shared private telemetry directory. Review sandbox settings before enabling either agent.

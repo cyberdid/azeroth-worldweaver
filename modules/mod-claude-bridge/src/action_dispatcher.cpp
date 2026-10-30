@@ -1,6 +1,9 @@
 #include "action_dispatcher.h"
+#include "vendor_journey.h"
+#include "vendor_transport.h"
 
 #include "Config.h"
+#include "ConditionMgr.h"
 #include "DBCStores.h"
 #include "Bag.h"
 #include "AttackAction.h"
@@ -25,8 +28,10 @@
 #include "PlayerbotMgr.h"
 #include "Playerbots.h"
 #include "MovementActions.h"
+#include "MotionMaster.h"
 #include "SpellMgr.h"
 #include "TradeData.h"
+#include "Trainer.h"
 #include "TravelMgr.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
@@ -37,6 +42,8 @@
 #include <charconv>
 #include <chrono>
 #include <cctype>
+#include <cmath>
+#include <limits>
 #include <deque>
 #include <iomanip>
 #include <iterator>
@@ -91,6 +98,11 @@ namespace
         {"equip_item", nullptr},
         {"interact_npc", nullptr},
         {"gossip_select", nullptr},
+        {"trainer_action", nullptr},
+        {"vendor_inspect", nullptr},
+        {"vendor_buy", nullptr},
+        {"vendor_travel", nullptr},
+        {"vendor_travel_cancel", nullptr},
         {"offer_items", nullptr},
         {"hunt_start", nullptr},
         {"hunt_cancel", nullptr},
@@ -108,6 +120,69 @@ namespace
         std::string groupId;
         uint64 targetGuid = 0;
         std::chrono::steady_clock::time_point expires;
+        std::string type = "interact_npc";
+        std::string taskToken = "-";
+    };
+
+    struct VendorBuyRequest
+    {
+        uint32 itemEntry = 0;
+        uint32 quantity = 0;
+        uint32 maxTotalCopper = 0;
+        bool allowExtendedCost = false;
+    };
+
+    struct InspectedVendorItem
+    {
+        uint32 slot = 0; // Native zero-based slot; telemetry uses client one-based slot.
+        uint32 entry = 0;
+        uint32 buyCount = 0;
+        int32 buyPrice = 0;
+        uint32 extendedCost = 0;
+    };
+
+    struct InspectedVendor
+    {
+        uint64 actorGuid = 0;
+        uint64 npcGuid = 0;
+        uint32 vendorEntry = 0;
+        std::vector<InspectedVendorItem> items;
+        std::chrono::steady_clock::time_point expires;
+    };
+
+    struct VendorTravelRequest
+    {
+        VendorJourneyLocation destination;
+        uint32 purchaseReserveCopper = 0;
+    };
+
+    struct VendorTravelTask
+    {
+        std::string actor;
+        std::string requester;
+        std::string groupId;
+        std::string actionId;
+        uint64 actorGuid = 0;
+        uint64 requesterGuid = 0;
+        uint32 purchaseReserveCopper = 0;
+        std::vector<std::pair<BotState, std::string>> restoreStrategies;
+        std::unique_ptr<VendorJourney> journey;
+        VendorJourneyRoute walkingFallback;
+        bool hasWalkingFallback = false;
+        bool fallbackTried = false;
+        bool taxiDeparted = false;
+        VendorJourneyStage lastPublishedStage = VendorJourneyStage::WalkingToDestination;
+        std::chrono::steady_clock::time_point lastTick;
+    };
+
+    struct DeferredVendorStrategyRestore
+    {
+        std::string actor;
+        std::string groupId;
+        std::string actionId;
+        uint64 actorGuid = 0;
+        uint32 mapId = 0;
+        std::vector<std::pair<BotState, std::string>> restoreStrategies;
     };
 
     struct ItemOfferRequest
@@ -278,6 +353,9 @@ namespace
     std::deque<std::pair<std::string, std::chrono::steady_clock::time_point>> actionOrder;
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> lastActionByActor;
     std::unordered_map<std::string, PendingNpcInteraction> pendingNpcInteractions;
+    std::unordered_map<std::string, InspectedVendor> inspectedVendors;
+    std::unordered_map<std::string, std::unique_ptr<VendorTravelTask>> vendorTravelTasks;
+    std::unordered_map<uint64, DeferredVendorStrategyRestore> deferredVendorStrategyRestores;
     std::mutex agentHuntMutex;
     std::unordered_map<std::string, std::unique_ptr<AgentHuntTask>> agentHuntTasks;
     std::unordered_map<std::string, std::unique_ptr<AgentGuideTask>> agentGuideTasks;
@@ -308,6 +386,58 @@ namespace
             return false;
         result = parsed;
         return true;
+    }
+
+    bool ParseVendorBuyRequest(std::string const& token, VendorBuyRequest& request)
+    {
+        if (token.size() > 64 || token.compare(0, 2, "v:") != 0)
+            return false;
+        std::vector<std::string> fields;
+        std::size_t start = 2;
+        while (start <= token.size())
+        {
+            std::size_t const end = token.find(':', start);
+            fields.push_back(token.substr(start, end == std::string::npos ? end : end - start));
+            if (end == std::string::npos)
+                break;
+            start = end + 1;
+        }
+        uint32 allow = 0;
+        if (fields.size() != 4 || !ParseInteger(fields[0], request.itemEntry)
+            || !ParseInteger(fields[1], request.quantity) || !ParseInteger(fields[2], request.maxTotalCopper)
+            || !ParseInteger(fields[3], allow) || !request.itemEntry || !request.quantity || allow > 1
+            || request.maxTotalCopper > MAX_MONEY_AMOUNT)
+            return false;
+        request.allowExtendedCost = allow == 1;
+        return true;
+    }
+
+    bool ParseVendorTravelRequest(std::string const& token, VendorTravelRequest& request)
+    {
+        if (token.size() > 160 || token.compare(0, 2, "r:") != 0)
+            return false;
+        std::vector<std::string> fields;
+        std::size_t start = 2;
+        while (start <= token.size())
+        {
+            std::size_t const end = token.find(':', start);
+            fields.push_back(token.substr(start, end == std::string::npos ? end : end - start));
+            if (end == std::string::npos)
+                break;
+            start = end + 1;
+        }
+        auto parseCoordinate = [](std::string const& field, float& result)
+        {
+            if (field.empty())
+                return false;
+            auto const parsed = std::from_chars(field.data(), field.data() + field.size(), result);
+            return parsed.ec == std::errc{} && parsed.ptr == field.data() + field.size()
+                && std::isfinite(result) && std::abs(result) < 17066.0f;
+        };
+        return fields.size() == 5 && ParseInteger(fields[0], request.destination.mapId)
+            && parseCoordinate(fields[1], request.destination.x) && parseCoordinate(fields[2], request.destination.y)
+            && parseCoordinate(fields[3], request.destination.z) && ParseInteger(fields[4], request.purchaseReserveCopper)
+            && request.purchaseReserveCopper <= MAX_MONEY_AMOUNT;
     }
 
     bool ParseHexBytes(std::string const& token, std::string& result, std::size_t maxBytes,
@@ -725,7 +855,7 @@ namespace
             && actor->GetInstanceId() == target->GetInstanceId() && actor->InSamePhase(target);
     }
 
-    Creature* ResolveTalkableNpc(Player* actor, uint64 guid)
+    Creature* ResolveTalkableNpc(Player* actor, uint64 guid, bool vendorOnly = false)
     {
         if (!actor || !guid)
             return nullptr;
@@ -733,7 +863,9 @@ namespace
         if (!npc || !npc->IsAlive() || !IsSameWorldPhase(actor, npc)
             || actor->GetDistance(npc) > 100.0f || npc->IsInCombat())
             return nullptr;
-        if (!npc->IsQuestGiver() && !npc->HasNpcFlag(UNIT_NPC_FLAG_GOSSIP))
+        if (vendorOnly ? !npc->HasNpcFlag(UNIT_NPC_FLAG_VENDOR)
+            : (!npc->IsQuestGiver() && !npc->HasNpcFlag(UNIT_NPC_FLAG_GOSSIP
+                | UNIT_NPC_FLAG_TRAINER | UNIT_NPC_FLAG_TRAINER_CLASS | UNIT_NPC_FLAG_TRAINER_PROFESSION)))
             return nullptr;
         return npc;
     }
@@ -849,6 +981,493 @@ namespace
                         out << static_cast<char>(c);
             }
         return out.str();
+    }
+
+    // Mirror SendListInventory's per-player visibility rules. Never enumerate DB-only rows
+    // or use an unbound session alternate vendor as the source of a catalog.
+    bool IsVisibleVendorItem(Player* actor, Creature* npc, VendorItem const* item, ItemTemplate const* proto)
+    {
+        if (!item || !proto)
+            return false;
+        if (!actor->IsGameMaster())
+        {
+            if (!(proto->AllowableClass & actor->getClassMask()) && proto->Bonding == BIND_WHEN_PICKED_UP)
+                return false;
+            if ((proto->HasFlag2(ITEM_FLAG2_FACTION_HORDE) && actor->GetTeamId() == TEAM_ALLIANCE)
+                || (proto->HasFlag2(ITEM_FLAG2_FACTION_ALLIANCE) && actor->GetTeamId() == TEAM_HORDE))
+                return false;
+            if (item->maxcount && !npc->GetVendorItemCurrentCount(item))
+                return false;
+        }
+        ConditionList const conditions = sConditionMgr->GetConditionsForNpcVendorEvent(npc->GetEntry(), item->item);
+        return sConditionMgr->IsObjectMeetToConditions(actor, npc, conditions);
+    }
+
+    VendorItemData const* OpenVendorInventory(Player* actor, Creature* npc)
+    {
+        if (!actor || !npc || !actor->IsAlive() || !actor->GetSession()
+            || !actor->IsWithinLOSInMap(npc)
+            || actor->GetNPCIfCanInteractWith(npc->GetGUID(), UNIT_NPC_FLAG_VENDOR) != npc)
+            return nullptr;
+        // Reset inherited alternate inventory. The native hook may select the alternate
+        // inventory for THIS interaction; read that selection only after opening it.
+        actor->GetSession()->SendListInventory(npc->GetGUID(), 0);
+        uint32 const entry = actor->GetSession()->GetCurrentVendor();
+        return entry ? sObjectMgr->GetNpcVendorItemList(entry) : npc->GetVendorItems();
+    }
+
+    void AppendVendorIdentity(std::ostringstream& out, Player* actor, Creature* npc,
+        std::string const& actionId, uint64 targetGuid = 0)
+    {
+        out << "\"action_id\":\"" << JsonEscape(actionId)
+            << "\",\"character\":\"" << JsonEscape(actor->GetName())
+            << "\",\"character_guid\":\"" << actor->GetGUID().GetRawValue()
+            << "\",\"npc_guid\":\"" << (npc ? npc->GetGUID().GetRawValue() : targetGuid)
+            << "\",\"npc_entry\":" << (npc ? npc->GetEntry() : 0)
+            << ",\"npc_name\":\"" << JsonEscape(npc ? npc->GetName() : "") << '"';
+    }
+
+    bool InspectVendor(Player* actor, Creature* npc, std::string const& actionId)
+    {
+        inspectedVendors.erase(Lower(actor->GetName()));
+        VendorItemData const* items = OpenVendorInventory(actor, npc);
+        if (!items)
+            return false;
+        InspectedVendor catalog;
+        catalog.actorGuid = actor->GetGUID().GetRawValue();
+        catalog.npcGuid = npc->GetGUID().GetRawValue();
+        catalog.vendorEntry = actor->GetSession()->GetCurrentVendor();
+        catalog.expires = std::chrono::steady_clock::now() + std::chrono::minutes(5);
+        std::ostringstream out;
+        out << '{';
+        AppendVendorIdentity(out, actor, npc, actionId);
+        out << ",\"vendor_entry\":" << catalog.vendorEntry << ",\"money_copper\":" << actor->GetMoney()
+            << ",\"honor_points\":" << actor->GetHonorPoints() << ",\"arena_points\":" << actor->GetArenaPoints()
+            << ",\"items\":[";
+        for (uint32 slot = 0; slot < items->GetItemCount() && catalog.items.size() < MAX_VENDOR_ITEMS; ++slot)
+        {
+            VendorItem const* item = items->GetItem(slot);
+            ItemTemplate const* proto = item ? sObjectMgr->GetItemTemplate(item->item) : nullptr;
+            if (!IsVisibleVendorItem(actor, npc, item, proto))
+                continue;
+            if (!catalog.items.empty())
+                out << ',';
+            catalog.items.push_back({slot, item->item, proto->BuyCount, proto->BuyPrice, item->ExtendedCost});
+            float const discount = actor->GetReputationPriceDiscount(npc);
+            bool const validPrice = proto->BuyPrice >= 0;
+            uint32 const price = validPrice && item->IsGoldRequired(proto)
+                ? uint32(std::floor(proto->BuyPrice * discount)) : 0;
+            out << "{\"entry\":" << item->item << ",\"name\":\"" << JsonEscape(proto->Name1)
+                << "\",\"vendor_slot\":" << slot + 1 << ",\"buy_count\":" << proto->BuyCount
+                << ",\"price_per_bundle_copper\":";
+            if (validPrice)
+                out << price;
+            else
+                out << "null";
+            out << ",\"base_price_per_bundle_copper\":" << std::max<int32>(0, proto->BuyPrice)
+                << ",\"valid_gold_price\":" << (validPrice ? "true" : "false")
+                << ",\"gold_required\":" << (item->IsGoldRequired(proto) ? "true" : "false")
+                << ",\"reputation_discount\":" << std::setprecision(std::numeric_limits<float>::max_digits10) << discount
+                << ",\"stock\":";
+            if (item->maxcount)
+                out << npc->GetVendorItemCurrentCount(item);
+            else
+                out << "null";
+            out << ",\"stock_max\":" << item->maxcount << ",\"stock_restock_seconds\":" << item->incrtime
+                << ",\"extended_cost\":{\"id\":" << item->ExtendedCost;
+            ItemExtendedCostEntry const* cost = item->ExtendedCost ? sItemExtendedCostStore.LookupEntry(item->ExtendedCost) : nullptr;
+            out << ",\"valid\":" << (!item->ExtendedCost || cost ? "true" : "false")
+                << ",\"honor_per_bundle\":" << (cost ? cost->reqhonorpoints : 0)
+                << ",\"arena_per_bundle\":" << (cost ? cost->reqarenapoints : 0)
+                << ",\"rating\":" << (cost ? cost->reqpersonalarenarating : 0)
+                << ",\"arena_slot\":" << (cost ? cost->reqarenaslot : 0) << ",\"items\":[";
+            bool firstCost = true;
+            if (cost)
+                for (uint8 i = 0; i < MAX_ITEM_EXTENDED_COST_REQUIREMENTS; ++i)
+                    if (cost->reqitem[i])
+                    {
+                        ItemTemplate const* currency = sObjectMgr->GetItemTemplate(cost->reqitem[i]);
+                        if (!firstCost)
+                            out << ',';
+                        firstCost = false;
+                        out << "{\"entry\":" << cost->reqitem[i] << ",\"name\":\""
+                            << JsonEscape(currency ? currency->Name1 : "") << "\",\"count_per_bundle\":"
+                            << cost->reqitemcount[i] << ",\"available\":" << actor->GetItemCount(cost->reqitem[i], false) << '}';
+                    }
+            out << "]},\"requirements\":{\"reputation_faction\":" << proto->RequiredReputationFaction
+                << ",\"reputation_rank\":" << proto->RequiredReputationRank
+                << ",\"reputation_met\":" << (!proto->RequiredReputationFaction
+                    || uint32(actor->GetReputationRank(proto->RequiredReputationFaction)) >= proto->RequiredReputationRank ? "true" : "false")
+                << "},\"conditions_passed\":true,\"conditions\":[";
+            ConditionList const conditions = sConditionMgr->GetConditionsForNpcVendorEvent(npc->GetEntry(), item->item);
+            bool firstCondition = true;
+            for (Condition const* condition : conditions)
+            {
+                if (!condition)
+                    continue;
+                if (!firstCondition)
+                    out << ',';
+                firstCondition = false;
+                out << "{\"type\":" << uint32(condition->ConditionType) << ",\"reference_id\":" << condition->ReferenceId
+                    << ",\"else_group\":" << condition->ElseGroup << ",\"target\":" << uint32(condition->ConditionTarget)
+                    << ",\"negative\":" << (condition->NegativeCondition ? "true" : "false")
+                    << ",\"values\":[" << condition->ConditionValue1 << ',' << condition->ConditionValue2 << ','
+                    << condition->ConditionValue3 << "]}";
+            }
+            out << "]}";
+        }
+        out << "]}";
+        inspectedVendors[Lower(actor->GetName())] = std::move(catalog);
+        PublishVendorEvent(actor, "vendor_catalog", out.str(), "action_id=" + actionId + " npc=" + npc->GetName());
+        return true;
+    }
+
+    void PublishVendorPurchaseFailure(Player* actor, Creature* npc, uint64 targetGuid,
+        std::string const& actionId, VendorBuyRequest const& request, std::string const& reason)
+    {
+        std::ostringstream out;
+        out << '{';
+        AppendVendorIdentity(out, actor, npc, actionId, targetGuid);
+        out << ",\"entry\":" << request.itemEntry << ",\"quantity_units\":" << request.quantity
+            << ",\"status\":\"failed\",\"reason_code\":\"" << JsonEscape(reason) << "\"}";
+        PublishVendorEvent(actor, "vendor_purchase", out.str(), "action_id=" + actionId + " " + reason);
+    }
+
+    bool BuyFromVendor(Player* actor, Creature* npc, std::string const& actionId,
+        VendorBuyRequest const& request, std::string& reason)
+    {
+        auto reject = [&](char const* why)
+        {
+            reason = why;
+            PublishVendorPurchaseFailure(actor, npc, npc->GetGUID().GetRawValue(), actionId, request, reason);
+            return false;
+        };
+        auto found = inspectedVendors.find(Lower(actor->GetName()));
+        if (found == inspectedVendors.end() || found->second.actorGuid != actor->GetGUID().GetRawValue()
+            || found->second.npcGuid != npc->GetGUID().GetRawValue()
+            || found->second.expires <= std::chrono::steady_clock::now())
+            return reject("vendor_catalog_required");
+        // Copy: refreshing a native list may invoke scripts. A catalog is bound to both
+        // the actual creature GUID and the alternate inventory selected for that creature.
+        InspectedVendor const catalog = found->second;
+        InspectedVendorItem const* selected = nullptr;
+        for (InspectedVendorItem const& candidate : catalog.items)
+            if (candidate.entry == request.itemEntry)
+            {
+                if (selected)
+                    return reject("vendor_item_ambiguous");
+                selected = &candidate;
+            }
+        if (!selected)
+            return reject("vendor_item_not_in_catalog");
+        VendorItemData const* items = OpenVendorInventory(actor, npc);
+        if (!items || actor->GetSession()->GetCurrentVendor() != catalog.vendorEntry)
+            return reject("vendor_catalog_changed");
+        VendorItem const* item = items->GetItem(selected->slot);
+        ItemTemplate const* proto = item ? sObjectMgr->GetItemTemplate(item->item) : nullptr;
+        if (!IsVisibleVendorItem(actor, npc, item, proto) || item->item != selected->entry
+            || proto->BuyCount != selected->buyCount || proto->BuyPrice != selected->buyPrice
+            || item->ExtendedCost != selected->extendedCost)
+            return reject("vendor_catalog_changed");
+        if (!proto->BuyCount || request.quantity % proto->BuyCount)
+            return reject("vendor_quantity_not_bundle_multiple");
+        uint32 const bundles = request.quantity / proto->BuyCount;
+        if (!bundles || bundles > std::numeric_limits<uint8>::max())
+            return reject("vendor_quantity_out_of_range");
+        if (item->ExtendedCost && !request.allowExtendedCost)
+            return reject("vendor_extended_cost_not_allowed");
+        // Native core clamps overflowing gold purchases. Reject instead, preserving the
+        // exact requested quantity, and use native TOTAL rounding (not rounded unit price).
+        if (proto->BuyPrice < 0)
+            return reject("vendor_invalid_price");
+        uint64 const rawGold = item->IsGoldRequired(proto) ? uint64(proto->BuyPrice) * bundles : 0;
+        if (rawGold > MAX_MONEY_AMOUNT)
+            return reject("vendor_price_overflow");
+        uint32 const price = uint32(std::floor(uint32(rawGold) * actor->GetReputationPriceDiscount(npc)));
+        if (price > request.maxTotalCopper)
+            return reject("vendor_max_cost_exceeded");
+        if (!actor->HasEnoughMoney(price))
+            return reject("vendor_not_enough_money");
+        if (item->maxcount && npc->GetVendorItemCurrentCount(item) < request.quantity)
+            return reject("vendor_insufficient_stock");
+        ItemExtendedCostEntry const* cost = item->ExtendedCost ? sItemExtendedCostStore.LookupEntry(item->ExtendedCost) : nullptr;
+        if (item->ExtendedCost && !cost)
+            return reject("vendor_invalid_extended_cost");
+        uint64 const honorCost = cost ? uint64(cost->reqhonorpoints) * bundles : 0;
+        uint64 const arenaCost = cost ? uint64(cost->reqarenapoints) * bundles : 0;
+        if (honorCost > uint64(std::numeric_limits<int32>::max()) || arenaCost > uint64(std::numeric_limits<int32>::max()))
+            return reject("vendor_currency_overflow");
+        std::map<uint32, uint64> currencyCosts;
+        if (cost)
+            for (uint8 i = 0; i < MAX_ITEM_EXTENDED_COST_REQUIREMENTS; ++i)
+                if (cost->reqitem[i])
+                    currencyCosts[cost->reqitem[i]] += uint64(cost->reqitemcount[i]) * bundles;
+        for (auto const& [entry, count] : currencyCosts)
+            if (count > std::numeric_limits<uint32>::max() || actor->GetItemCount(entry, false) < count)
+                return reject("vendor_missing_currency_items");
+        uint32 const moneyBefore = actor->GetMoney();
+        uint32 const honorBefore = actor->GetHonorPoints();
+        uint32 const arenaBefore = actor->GetArenaPoints();
+        std::map<uint32, uint32> countsBefore;
+        countsBefore[request.itemEntry] = actor->GetItemCount(request.itemEntry, false);
+        for (auto const& [entry, count] : currencyCosts)
+            countsBefore[entry] = actor->GetItemCount(entry, false);
+        // Native core enforces inventory capacity, uniqueness, reputation, honor, arena,
+        // turn-ins and stock. Its bool is a LIMITED-STOCK flag, not a success flag.
+        bool const nativeReturn = actor->BuyItemFromVendorSlot(npc->GetGUID(), selected->slot,
+            request.itemEntry, static_cast<uint8>(bundles), NULL_BAG, NULL_SLOT);
+        bool verified = int64(actor->GetMoney()) == int64(moneyBefore) - price
+            && int64(actor->GetHonorPoints()) == int64(honorBefore) - int64(honorCost)
+            && int64(actor->GetArenaPoints()) == int64(arenaBefore) - int64(arenaCost);
+        bool observedChange = actor->GetMoney() != moneyBefore || actor->GetHonorPoints() != honorBefore
+            || actor->GetArenaPoints() != arenaBefore;
+        for (auto const& [entry, before] : countsBefore)
+        {
+            uint32 const after = actor->GetItemCount(entry, false);
+            int64 const expected = int64(before) + (entry == request.itemEntry ? request.quantity : 0) - int64(currencyCosts[entry]);
+            verified = verified && int64(after) == expected;
+            observedChange = observedChange || after != before;
+        }
+        bool const success = verified && observedChange;
+        reason = success ? "vendor_purchase_verified" : "native_purchase_rejected_or_unverified";
+        std::ostringstream out;
+        out << '{';
+        AppendVendorIdentity(out, actor, npc, actionId);
+        out << ",\"entry\":" << request.itemEntry << ",\"name\":\"" << JsonEscape(proto->Name1)
+            << "\",\"vendor_slot\":" << selected->slot + 1 << ",\"quantity_units\":" << request.quantity
+            << ",\"bundles\":" << bundles << ",\"expected_cost_copper\":" << price
+            << ",\"money_before\":" << moneyBefore << ",\"money_after\":" << actor->GetMoney()
+            << ",\"item_count_before\":" << countsBefore[request.itemEntry]
+            << ",\"item_count_after\":" << actor->GetItemCount(request.itemEntry, false)
+            << ",\"native_return\":" << (nativeReturn ? "true" : "false")
+            << ",\"status\":\"" << (success ? "success" : "failed") << "\",\"reason_code\":\"" << reason << "\"}";
+        PublishVendorEvent(actor, "vendor_purchase", out.str(), "action_id=" + actionId + " " + reason);
+        return success;
+    }
+
+    void PublishVendorTravelUpdate(VendorTravelTask const& task, Player* actor,
+        std::string const& status, std::string const& reason, VendorJourneyPlan const* plan = nullptr)
+    {
+        VendorJourneyLocation const& destination = task.journey->Route().destination;
+        std::ostringstream out;
+        out << "{\"action_id\":\"" << JsonEscape(task.actionId) << "\",\"character\":\"" << JsonEscape(task.actor)
+            << "\",\"status\":\"" << JsonEscape(status) << "\",\"reason_code\":\"" << JsonEscape(reason)
+            << "\",\"map_id\":" << destination.mapId << ",\"x\":" << destination.x << ",\"y\":" << destination.y
+            << ",\"z\":" << destination.z << ",\"stage\":\"" << VendorJourneyStageName(task.journey->Stage())
+            << "\",\"uses_taxi\":" << (task.journey->Route().UsesTaxi() ? "true" : "false")
+            << ",\"uses_transport\":" << (task.journey->Route().UsesTransport() ? "true" : "false")
+            << ",\"purchase_reserve_copper\":" << task.purchaseReserveCopper
+            << ",\"strategy_restore_pending\":"
+            << (deferredVendorStrategyRestores.contains(task.actorGuid) ? "true" : "false");
+        if (actor && actor->IsInWorld() && actor->GetGUID().GetRawValue() == task.actorGuid)
+            out << ",\"actual_map_id\":" << actor->GetMapId() << ",\"actual_x\":" << actor->GetPositionX()
+                << ",\"actual_y\":" << actor->GetPositionY() << ",\"actual_z\":" << actor->GetPositionZ();
+        if (plan)
+        {
+            out << ",\"candidates\":[";
+            bool first = true;
+            for (VendorJourneyRoute const& route : plan->candidates)
+            {
+                if (!first)
+                    out << ',';
+                first = false;
+                out << "{\"uses_taxi\":" << (route.UsesTaxi() ? "true" : "false")
+                    << ",\"uses_transport\":" << (route.UsesTransport() ? "true" : "false")
+                    << ",\"estimated_seconds\":" << route.estimatedSeconds
+                    << ",\"maximum_fare_copper\":" << route.maximumFareCopper
+                    << ",\"flightmaster_entry\":" << route.flightmasterEntry
+                    << ",\"flightmaster_spawn_id\":" << route.flightmasterSpawnId << ",\"taxi_nodes\":[";
+                for (std::size_t i = 0; i < route.taxiNodes.size(); ++i)
+                {
+                    if (i)
+                        out << ',';
+                    out << route.taxiNodes[i];
+                }
+                out << "],\"transport_legs\":[";
+                if (route.transportPlan)
+                {
+                    bool firstLeg = true;
+                    for (VendorTransportLeg const& leg : route.transportPlan->legs)
+                    {
+                        if (!firstLeg)
+                            out << ',';
+                        firstLeg = false;
+                        char const* kind = leg.kind == VendorTransportLegKind::Walk ? "walk"
+                            : leg.kind == VendorTransportLegKind::AreaTrigger ? "area_trigger" : "transport";
+                        out << "{\"kind\":\"" << kind << "\",\"entry\":" << leg.entry
+                            << ",\"from\":{\"map_id\":" << leg.from.mapId << ",\"x\":" << leg.from.x
+                            << ",\"y\":" << leg.from.y << ",\"z\":" << leg.from.z
+                            << "},\"to\":{\"map_id\":" << leg.to.mapId << ",\"x\":" << leg.to.x
+                            << ",\"y\":" << leg.to.y << ",\"z\":" << leg.to.z
+                            << "},\"waypoint_count\":" << leg.waypoints.size() << '}';
+                    }
+                }
+                out << "]}";
+            }
+            out << ']';
+        }
+        out << '}';
+        PublishVendorJourneyEvent(task.groupId, task.actor, destination.mapId, out.str(),
+            "action_id=" + task.actionId + " status=" + status + " reason=" + reason);
+    }
+
+    void PauseVendorTravelStrategies(PlayerbotAI* botAI, VendorTravelTask& task)
+    {
+        // These registered strategies can initiate independent travel or NPC/object
+        // approaches. Defensive and combat behavior remains enabled during the trip.
+        constexpr char const* movementStrategies[] = {
+            "follow", "stay", "travel", "grind", "loot", "gather", "rpg", "new rpg", "quest", "mount"
+        };
+        std::string disable;
+        for (char const* strategy : movementStrategies)
+        {
+            if (!disable.empty())
+                disable += ',';
+            disable += std::string("-") + strategy;
+        }
+        for (BotState state : {BOT_STATE_NON_COMBAT, BOT_STATE_COMBAT, BOT_STATE_DEAD, BOT_STATE_REACTION})
+        {
+            std::string restore = disable;
+            for (char const* strategy : movementStrategies)
+                if (botAI->HasStrategy(strategy, state))
+                    restore += std::string(",+") + strategy;
+            task.restoreStrategies.emplace_back(state, std::move(restore));
+            botAI->ChangeStrategy(disable, state);
+        }
+    }
+
+    bool CanRestoreVendorMovement(Player const* actor)
+    {
+        return actor && actor->IsInWorld() && !actor->IsBeingTeleported()
+            && !actor->GetTransport() && !actor->HasUnitState(UNIT_STATE_IN_FLIGHT)
+            && !actor->IsFlying() && !actor->IsFalling();
+    }
+
+    void HoldVendorMovementForSafeRestore(PlayerbotAI* botAI)
+    {
+        if (!botAI)
+            return;
+        for (BotState state : {BOT_STATE_NON_COMBAT, BOT_STATE_COMBAT, BOT_STATE_DEAD, BOT_STATE_REACTION})
+        {
+            bool needsHold = !botAI->HasStrategy("stay", state);
+            for (char const* strategy : {"follow", "travel", "grind", "loot", "gather", "rpg", "new rpg", "quest", "mount"})
+                needsHold = needsHold || botAI->HasStrategy(strategy, state);
+            if (needsHold)
+                botAI->ChangeStrategy("-follow,+stay,-travel,-grind,-loot,-gather,-rpg,-new rpg,-quest,-mount", state);
+        }
+    }
+
+    void RestoreVendorTravelStrategies(Player* actor, VendorTravelTask const& task)
+    {
+        if (!actor || actor->GetGUID().GetRawValue() != task.actorGuid)
+            return;
+        PlayerbotAI* botAI = sPlayerbotsMgr.GetPlayerbotAI(actor);
+        if (!CanRestoreVendorMovement(actor))
+        {
+            // Cancelling a native trip never detaches a passenger at sea or stops
+            // a native flight. Keep its original strategies until normal landing
+            // or physical disembarkation, instead of following across the deck.
+            deferredVendorStrategyRestores[task.actorGuid] = {
+                task.actor, task.groupId, task.actionId, task.actorGuid, task.journey->Route().destination.mapId,
+                task.restoreStrategies
+            };
+            HoldVendorMovementForSafeRestore(botAI);
+            return;
+        }
+        if (botAI)
+            for (auto const& [state, strategies] : task.restoreStrategies)
+                botAI->ChangeStrategy(strategies, state);
+    }
+
+    void UpdateDeferredVendorStrategyRestores()
+    {
+        for (auto iter = deferredVendorStrategyRestores.begin(); iter != deferredVendorStrategyRestores.end(); )
+        {
+            DeferredVendorStrategyRestore const& pending = iter->second;
+            Player* actor = ObjectAccessor::FindConnectedPlayer(ObjectGuid(pending.actorGuid));
+            PlayerbotAI* botAI = actor ? sPlayerbotsMgr.GetPlayerbotAI(actor) : nullptr;
+            if (!CanRestoreVendorMovement(actor) || !botAI || !actor->GetSession())
+            {
+                // Native transport membership updates continue independently of
+                // Playerbots movement strategies. Never force a disembark here.
+                HoldVendorMovementForSafeRestore(botAI);
+                ++iter;
+                continue;
+            }
+            for (auto const& [state, strategies] : pending.restoreStrategies)
+                botAI->ChangeStrategy(strategies, state);
+            std::string const payload = "{\"action_id\":\"" + JsonEscape(pending.actionId)
+                + "\",\"character\":\"" + JsonEscape(pending.actor)
+                + "\",\"status\":\"restored\",\"reason_code\":\"journey_strategies_restored\","
+                  "\"strategy_restore_pending\":false}";
+            PublishVendorJourneyEvent(pending.groupId, pending.actor, actor->GetMapId(), payload,
+                "action_id=" + pending.actionId + " journey_strategies_restored");
+            iter = deferredVendorStrategyRestores.erase(iter);
+        }
+    }
+
+    void UpdateVendorTravelTasks()
+    {
+        auto const now = std::chrono::steady_clock::now();
+        for (auto iter = vendorTravelTasks.begin(); iter != vendorTravelTasks.end(); )
+        {
+            VendorTravelTask& task = *iter->second;
+            // Connected lookup retains the same authenticated Player object while
+            // native portal/boat handlers briefly remove it from the world map.
+            Player* actor = ObjectAccessor::FindConnectedPlayer(ObjectGuid(task.actorGuid));
+            Player* requester = ObjectAccessor::FindConnectedPlayer(ObjectGuid(task.requesterGuid));
+            PlayerbotAI* botAI = actor ? sPlayerbotsMgr.GetPlayerbotAI(actor) : nullptr;
+            bool const ownedTransfer = task.journey->IsNativeTransferPending();
+            bool const actorWorldValid = actor
+                && ((actor->IsInWorld() && !actor->IsBeingTeleported()) || ownedTransfer);
+            bool const valid = actorWorldValid && requester && requester->IsInWorld()
+                && actor->GetSession() && actor->GetSession()->GetPlayer() == actor && requester->GetSession()
+                && actor->GetGUID().GetRawValue() == task.actorGuid
+                && requester->GetGUID().GetRawValue() == task.requesterGuid
+                && actor->GetGroup() && actor->GetGroup() == requester->GetGroup()
+                && std::to_string(actor->GetGroup()->GetLeaderGUID().GetRawValue()) == task.groupId
+                && botAI && botAI->GetMaster() == requester && IsAuthorizedRequester(requester->GetName());
+            if (!valid)
+            {
+                task.journey->Cancel(actor);
+                RestoreVendorTravelStrategies(actor, task);
+                PublishVendorTravelUpdate(task, actor, "failed", "journey_context_changed");
+                iter = vendorTravelTasks.erase(iter);
+                continue;
+            }
+            auto const elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - task.lastTick).count();
+            task.lastTick = now;
+            uint32 const elapsedMs = static_cast<uint32>(std::clamp<int64>(elapsed, 0, std::numeric_limits<uint32>::max()));
+            VendorJourneyStage const stage = task.journey->Tick(actor, elapsedMs);
+            task.taxiDeparted = task.taxiDeparted || stage == VendorJourneyStage::Flying;
+            std::string const& reason = task.journey->Reason();
+            bool const taxiDepartureFailure = reason.find("journey_taxi_") == 0
+                || reason.find("journey_flightmaster_") == 0 || reason == "journey_route_stalled";
+            if (stage == VendorJourneyStage::Failed && task.journey->Route().UsesTaxi() && !task.taxiDeparted
+                && !task.fallbackTried && task.hasWalkingFallback && taxiDepartureFailure)
+            {
+                task.fallbackTried = true;
+                task.journey = std::make_unique<VendorJourney>(task.walkingFallback, task.purchaseReserveCopper);
+                task.lastPublishedStage = task.journey->Stage();
+                PublishVendorTravelUpdate(task, actor, "routing", "journey_walking_fallback");
+                ++iter;
+                continue;
+            }
+            if (!task.journey->IsTerminal() && stage != task.lastPublishedStage)
+            {
+                task.lastPublishedStage = stage;
+                PublishVendorTravelUpdate(task, actor, "routing", reason);
+            }
+            if (task.journey->IsTerminal())
+            {
+                RestoreVendorTravelStrategies(actor, task);
+                PublishVendorTravelUpdate(task, actor,
+                    stage == VendorJourneyStage::Arrived ? "arrived" : "failed", reason);
+                iter = vendorTravelTasks.erase(iter);
+                continue;
+            }
+            ++iter;
+        }
     }
 
     ActionResult MakeResult(std::string const& actionId, std::string const& actorName,
@@ -1595,6 +2214,8 @@ ActionResult DispatchTypedAction(std::string const& actorName, std::string const
     ItemLocationRequest itemLocation;
     HuntRequest huntRequest;
     GuideRequest guideRequest;
+    VendorBuyRequest vendorBuyRequest;
+    VendorTravelRequest vendorTravelRequest;
     bool const isOfferItems = actionType == "offer_items";
     bool const isUseItem = actionType == "use_item";
     bool const isEquipItem = actionType == "equip_item";
@@ -1603,7 +2224,12 @@ ActionResult DispatchTypedAction(std::string const& actorName, std::string const
     bool const isHuntCancel = actionType == "hunt_cancel";
     bool const isGuideStart = actionType == "guide_start";
     bool const isGuideCancel = actionType == "guide_cancel";
+    bool const isVendorTravel = actionType == "vendor_travel";
+    bool const isVendorTravelCancel = actionType == "vendor_travel_cancel";
+    bool const isVendorBuy = actionType == "vendor_buy";
+    bool const isVendor = isVendorBuy || actionType == "vendor_inspect";
     bool const isPlayerbotAction = actionType == "playerbot_action";
+    bool const isTrainerAction = actionType == "trainer_action";
     std::string playerbotActionName;
     std::string playerbotQualifier;
     bool const validPlayerbotAction = !isPlayerbotAction
@@ -1616,11 +2242,15 @@ ActionResult DispatchTypedAction(std::string const& actorName, std::string const
         result.reasonCode = "invalid_action_arguments";
         return Finish(nullptr, std::move(result), false);
     }
-    if ((isHuntStart && !ParseHuntRequest(taskToken, huntRequest))
+    if ((isVendorTravel && !ParseVendorTravelRequest(taskToken, vendorTravelRequest))
+        || (isVendorBuy && !ParseVendorBuyRequest(taskToken, vendorBuyRequest))
+        || (isHuntStart && !ParseHuntRequest(taskToken, huntRequest))
         || (isHuntCancel && taskToken != "cancel")
         || (isGuideStart && !ParseGuideRequest(taskToken, guideRequest))
         || (isGuideCancel && taskToken != "cancel")
-        || (!isHuntStart && !isHuntCancel && !isGuideStart && !isGuideCancel && !isPlayerbotAction
+        || (isTrainerAction && taskToken != "inspect" && taskToken != "learn")
+        || (!isHuntStart && !isHuntCancel && !isGuideStart && !isGuideCancel && !isPlayerbotAction && !isVendorBuy && !isVendorTravel
+            && !isTrainerAction
             && taskToken != "-")
         || !validPlayerbotAction)
     {
@@ -1628,7 +2258,7 @@ ActionResult DispatchTypedAction(std::string const& actorName, std::string const
         return Finish(nullptr, std::move(result), false);
     }
     bool const isCast = actionType == "cast_spell";
-    bool const isNpcAction = actionType == "interact_npc" || actionType == "gossip_select";
+    bool const isNpcAction = actionType == "interact_npc" || actionType == "gossip_select" || isVendor || isTrainerAction;
     bool const isUnitTargetAction = isCast || isPlayerbotAction;
     bool const isGossipSelect = actionType == "gossip_select";
     if ((isCast ? spellId == 0 : spellId != 0)
@@ -1664,13 +2294,13 @@ ActionResult DispatchTypedAction(std::string const& actorName, std::string const
     std::string const rateKey = Lower(requesterName) + ":" + Lower(actorName);
     auto const now = std::chrono::steady_clock::now();
     auto previous = lastActionByActor.find(rateKey);
-    if (previous != lastActionByActor.end() && now - previous->second < ACTION_RATE_LIMIT)
+    if (!isVendorTravelCancel && previous != lastActionByActor.end() && now - previous->second < ACTION_RATE_LIMIT)
     {
         result.reasonCode = "rate_limited";
         return Finish(requester, std::move(result), true);
     }
 
-    Player* actor = ObjectAccessor::FindPlayerByName(actorName);
+    Player* actor = ObjectAccessor::FindPlayerByName(actorName, !isVendorTravelCancel);
     if (actionType == "ensure_online")
     {
         if (actor && actor->IsInWorld())
@@ -1712,7 +2342,12 @@ ActionResult DispatchTypedAction(std::string const& actorName, std::string const
         return Finish(requester, std::move(result), true);
     }
 
-    if (!actor || !actor->IsInWorld())
+    auto transferJourney = vendorTravelTasks.find(Lower(actorName));
+    bool const canCancelNativeTransfer = isVendorTravelCancel && actor
+        && transferJourney != vendorTravelTasks.end()
+        && transferJourney->second->actorGuid == actor->GetGUID().GetRawValue()
+        && transferJourney->second->journey->IsNativeTransferPending();
+    if (!actor || (!actor->IsInWorld() && !canCancelNativeTransfer))
     {
         result.reasonCode = "actor_unavailable";
         return Finish(requester, std::move(result), true);
@@ -1731,6 +2366,145 @@ ActionResult DispatchTypedAction(std::string const& actorName, std::string const
     if (botAI->GetMaster() != requester)
     {
         result.reasonCode = "actor_not_owned_by_requester";
+        return Finish(requester, std::move(result), true);
+    }
+
+    if (deferredVendorStrategyRestores.contains(actor->GetGUID().GetRawValue()))
+    {
+        // A follow/generic action arriving immediately after cancellation must
+        // not undo the safe passenger hold before the native trip has ended.
+        UpdateDeferredVendorStrategyRestores();
+        if (deferredVendorStrategyRestores.contains(actor->GetGUID().GetRawValue())
+            && !isVendorTravelCancel && actionType != "stay")
+        {
+            result.reasonCode = "journey_waiting_safe_transfer_end";
+            return Finish(requester, std::move(result), true);
+        }
+    }
+
+    auto existingJourney = vendorTravelTasks.find(Lower(actorName));
+    if (existingJourney != vendorTravelTasks.end() && !isVendorTravelCancel)
+    {
+        result.reasonCode = "vendor_journey_busy";
+        return Finish(requester, std::move(result), true);
+    }
+    if (isVendorTravelCancel)
+    {
+        auto pending = pendingNpcInteractions.find(Lower(actorName));
+        bool const pendingVendor = pending != pendingNpcInteractions.end()
+            && (pending->second.type == "vendor_inspect" || pending->second.type == "vendor_buy");
+        if ((existingJourney != vendorTravelTasks.end()
+                && (existingJourney->second->requesterGuid != requester->GetGUID().GetRawValue()
+                    || existingJourney->second->groupId != groupId))
+            || (pendingVendor && (Lower(pending->second.requester) != Lower(requesterName)
+                || pending->second.groupId != groupId)))
+        {
+            result.reasonCode = "journey_owner_mismatch";
+            return Finish(requester, std::move(result), true);
+        }
+        if (pendingVendor)
+        {
+            PendingNpcInteraction const cancelled = pending->second;
+            // Clear the delayed executor before publishing any acknowledgement: a
+            // cancelled approach must never later reach BuyItemFromVendorSlot.
+            pendingNpcInteractions.erase(pending);
+            ActionResult const cancelledResult = MakeResult(cancelled.actionId, cancelled.actor,
+                cancelled.type, "rejected", "vendor_task_cancelled");
+            RememberResult(cancelledResult);
+            PublishActionResultEvent(requester, cancelled.actor, cancelled.actionId, cancelled.type,
+                "rejected", "vendor_task_cancelled");
+            if (cancelled.type == "vendor_buy")
+            {
+                VendorBuyRequest request;
+                if (ParseVendorBuyRequest(cancelled.taskToken, request))
+                    PublishVendorPurchaseFailure(actor, nullptr, cancelled.targetGuid, cancelled.actionId,
+                        request, "vendor_task_cancelled");
+            }
+            if (!actor->HasUnitState(UNIT_STATE_IN_FLIGHT))
+            {
+                actor->StopMoving();
+                actor->GetMotionMaster()->Clear();
+            }
+        }
+        bool const hadJourney = existingJourney != vendorTravelTasks.end();
+        if (hadJourney)
+        {
+            VendorTravelTask& task = *existingJourney->second;
+            task.journey->Cancel(actor);
+            RestoreVendorTravelStrategies(actor, task);
+            PublishVendorTravelUpdate(task, actor, "failed", "journey_cancelled");
+            vendorTravelTasks.erase(existingJourney);
+        }
+        lastActionByActor[rateKey] = now;
+        result.status = "accepted";
+        result.reasonCode = hadJourney ? "vendor_journey_cancelled"
+            : pendingVendor ? "vendor_approach_cancelled" : "vendor_journey_already_idle";
+        return Finish(requester, std::move(result), true);
+    }
+    if (isVendorTravel)
+    {
+        if (!actor->IsAlive() || !actor->GetSession() || !requester->GetSession())
+        {
+            result.reasonCode = "journey_actor_unavailable";
+            return Finish(requester, std::move(result), true);
+        }
+        if (actor->HasUnitState(UNIT_STATE_IN_FLIGHT) || actor->IsFlying())
+        {
+            result.reasonCode = "journey_world_ground_route_required";
+            return Finish(requester, std::move(result), true);
+        }
+        if (pendingNpcInteractions.find(Lower(actorName)) != pendingNpcInteractions.end())
+        {
+            result.reasonCode = "npc_approach_busy";
+            return Finish(requester, std::move(result), true);
+        }
+        {
+            std::lock_guard<std::mutex> lock(agentHuntMutex);
+            auto hunt = agentHuntTasks.find(Lower(actorName));
+            auto guide = agentGuideTasks.find(Lower(actorName));
+            if ((hunt != agentHuntTasks.end() && IsAgentHuntActive(*hunt->second))
+                || (guide != agentGuideTasks.end() && IsAgentGuideActive(*guide->second)))
+            {
+                result.reasonCode = "actor_task_busy";
+                return Finish(requester, std::move(result), true);
+            }
+        }
+        VendorJourneyPlan const plan = PlanVendorJourney(actor, vendorTravelRequest.destination,
+            vendorTravelRequest.purchaseReserveCopper);
+        if (plan.candidates.empty())
+        {
+            result.reasonCode = plan.reasonCode;
+            return Finish(requester, std::move(result), true);
+        }
+        auto task = std::make_unique<VendorTravelTask>();
+        task->actor = actorName;
+        task->requester = requesterName;
+        task->groupId = groupId;
+        task->actionId = actionId;
+        task->actorGuid = actor->GetGUID().GetRawValue();
+        task->requesterGuid = requester->GetGUID().GetRawValue();
+        task->purchaseReserveCopper = vendorTravelRequest.purchaseReserveCopper;
+        task->lastTick = now;
+        task->journey = std::make_unique<VendorJourney>(plan.candidates.front(), task->purchaseReserveCopper);
+        task->lastPublishedStage = task->journey->Stage();
+        for (VendorJourneyRoute const& route : plan.candidates)
+            if (!route.UsesTaxi() && !route.UsesTransport())
+            {
+                task->walkingFallback = route;
+                task->hasWalkingFallback = true;
+                break;
+            }
+        PauseVendorTravelStrategies(botAI, *task);
+        if (!actor->IsInCombat())
+        {
+            actor->StopMoving();
+            actor->GetMotionMaster()->Clear();
+        }
+        PublishVendorTravelUpdate(*task, actor, "started", plan.reasonCode, &plan);
+        vendorTravelTasks[Lower(actorName)] = std::move(task);
+        lastActionByActor[rateKey] = now;
+        result.status = "accepted";
+        result.reasonCode = "vendor_journey_started";
         return Finish(requester, std::move(result), true);
     }
 
@@ -2195,6 +2969,50 @@ ActionResult DispatchTypedAction(std::string const& actorName, std::string const
         return Finish(requester, std::move(result), true);
     }
 
+    if (isVendor)
+    {
+        auto reject = [&](char const* reason)
+        {
+            result.reasonCode = reason;
+            if (isVendorBuy)
+                PublishVendorPurchaseFailure(actor, nullptr, targetGuid, actionId, vendorBuyRequest, reason);
+            return Finish(requester, std::move(result), true);
+        };
+        if (!actor->IsAlive())
+            return reject("actor_dead");
+        if (actor->IsInCombat())
+            return reject("actor_in_combat");
+        if (!actor->GetSession())
+            return reject("actor_session_unavailable");
+        Creature* npc = ResolveTalkableNpc(actor, targetGuid, true);
+        if (!npc)
+            return reject("npc_unavailable_or_out_of_range");
+        if (pendingNpcInteractions.find(Lower(actorName)) != pendingNpcInteractions.end())
+            return reject("npc_approach_busy");
+        if (actor->IsWithinDistInMap(npc, INTERACTION_DISTANCE))
+        {
+            std::string reason;
+            bool const completed = isVendorBuy ? BuyFromVendor(actor, npc, actionId, vendorBuyRequest, reason)
+                : InspectVendor(actor, npc, actionId);
+            result.status = completed ? "accepted" : "rejected";
+            result.reasonCode = isVendorBuy ? reason : completed ? "vendor_catalog_published" : "vendor_inspection_rejected";
+            lastActionByActor[rateKey] = now;
+            return Finish(requester, std::move(result), true);
+        }
+        if (pendingNpcInteractions.size() >= MAX_PENDING_NPC_INTERACTIONS
+            || pendingNpcInteractions.find(Lower(actorName)) != pendingNpcInteractions.end())
+            return reject("npc_approach_busy");
+        BridgeMovementAction movement(botAI);
+        if (!movement.Approach(npc))
+            return reject("npc_approach_failed");
+        pendingNpcInteractions.emplace(Lower(actorName), PendingNpcInteraction{
+            actorName, requesterName, actionId, groupId, targetGuid, now + NPC_APPROACH_TIMEOUT, actionType, taskToken});
+        lastActionByActor[rateKey] = now;
+        result.status = "accepted";
+        result.reasonCode = "approaching_npc";
+        return Finish(requester, std::move(result), true);
+    }
+
     if (actionType == "interact_npc")
     {
         if (actor->IsInCombat())
@@ -2257,7 +3075,8 @@ ActionResult DispatchTypedAction(std::string const& actorName, std::string const
             return Finish(requester, std::move(result), true);
         }
         if (item->IsCoded || item->BoxMoney != 0
-            || (item->OptionType != GOSSIP_OPTION_GOSSIP && item->OptionType != GOSSIP_OPTION_QUESTGIVER))
+            || (item->OptionType != GOSSIP_OPTION_GOSSIP && item->OptionType != GOSSIP_OPTION_QUESTGIVER
+                && item->OptionType != GOSSIP_OPTION_TRAINER))
         {
             result.reasonCode = "gossip_option_not_supported";
             return Finish(requester, std::move(result), true);
@@ -2274,8 +3093,54 @@ ActionResult DispatchTypedAction(std::string const& actorName, std::string const
         return Finish(requester, std::move(result), true);
     }
 
+    if (isTrainerAction)
+    {
+        if (actor->IsInCombat())
+        {
+            result.reasonCode = "actor_in_combat";
+            return Finish(requester, std::move(result), true);
+        }
+        Creature* trainerNpc = actor->GetNPCIfCanInteractWith(ObjectGuid(targetGuid),
+            UNIT_NPC_FLAG_TRAINER | UNIT_NPC_FLAG_TRAINER_CLASS | UNIT_NPC_FLAG_TRAINER_PROFESSION);
+        Trainer::Trainer const* trainer = trainerNpc ? sObjectMgr->GetTrainer(trainerNpc->GetEntry()) : nullptr;
+        if (!trainerNpc || !trainer || !trainer->IsTrainerValidForPlayer(actor))
+        {
+            result.reasonCode = "trainer_unavailable_or_out_of_range";
+            return Finish(requester, std::move(result), true);
+        }
+
+        // Playerbot reports "nothing teachable now" as an unavailable action;
+        // name it, so the agent can explain the real reason (skill or level).
+        auto const& trainerSpells = trainer->GetSpells();
+        if (std::none_of(trainerSpells.begin(), trainerSpells.end(),
+            [&](Trainer::Spell const& spell) { return trainer->CanTeachSpell(actor, &spell); }))
+        {
+            result.reasonCode = "trainer_nothing_to_learn";
+            return Finish(requester, std::move(result), true);
+        }
+
+        actor->SetSelection(trainerNpc->GetGUID());
+        Event const trainerEvent("bridge request", taskToken, requester);
+        if (!botAI->DoSpecificAction("trainer", trainerEvent, true, taskToken))
+        {
+            result.reasonCode = "trainer_action_unavailable";
+            return Finish(requester, std::move(result), true);
+        }
+
+        lastActionByActor[rateKey] = now;
+        result.status = "accepted";
+        result.reasonCode = taskToken == "learn" ? "trainer_learning_started" : "trainer_inspection_started";
+        return Finish(requester, std::move(result), true);
+    }
+
     if (isPlayerbotAction)
     {
+        // Purchases must retain the typed quantity, budget and currency checks.
+        if (playerbotActionName == "buy" || playerbotActionName == "rpg buy")
+        {
+            result.reasonCode = "use_typed_vendor_purchase";
+            return Finish(requester, std::move(result), true);
+        }
         AiObjectContext* context = botAI->GetAiObjectContext();
         std::set<std::string> const supportedActions = context ? context->GetSupportedActions()
             : std::set<std::string>{};
@@ -2464,7 +3329,13 @@ void UpdatePendingTypedActions()
         auto fail = [&](char const* reason)
         {
             if (requester && requester->IsInWorld())
-                PublishActionResultEvent(requester, pending.actor, pending.actionId, "interact_npc", "rejected", reason);
+                PublishActionResultEvent(requester, pending.actor, pending.actionId, pending.type, "rejected", reason);
+            if (pending.type == "vendor_buy" && actor && actor->IsInWorld())
+            {
+                VendorBuyRequest request;
+                if (ParseVendorBuyRequest(pending.taskToken, request))
+                    PublishVendorPurchaseFailure(actor, nullptr, pending.targetGuid, pending.actionId, request, reason);
+            }
             iter = pendingNpcInteractions.erase(iter);
         };
         if (now >= pending.expires)
@@ -2479,7 +3350,14 @@ void UpdatePendingTypedActions()
             fail("npc_approach_context_changed");
             continue;
         }
-        Creature* npc = ResolveTalkableNpc(actor, pending.targetGuid);
+        bool const vendor = pending.type == "vendor_inspect" || pending.type == "vendor_buy";
+        PlayerbotAI* botAI = sPlayerbotsMgr.GetPlayerbotAI(actor);
+        if (!botAI || botAI->GetMaster() != requester || !actor->IsAlive() || !actor->GetSession())
+        {
+            fail("npc_approach_context_changed");
+            continue;
+        }
+        Creature* npc = ResolveTalkableNpc(actor, pending.targetGuid, vendor);
         if (!npc || actor->IsInCombat())
         {
             fail("npc_lost_or_actor_in_combat");
@@ -2487,6 +3365,26 @@ void UpdatePendingTypedActions()
         }
         if (actor->IsWithinDistInMap(npc, INTERACTION_DISTANCE))
         {
+            if (vendor)
+            {
+                std::string reason;
+                bool completed = false;
+                if (pending.type == "vendor_buy")
+                {
+                    VendorBuyRequest request;
+                    completed = ParseVendorBuyRequest(pending.taskToken, request)
+                        && BuyFromVendor(actor, npc, pending.actionId, request, reason);
+                }
+                else
+                {
+                    completed = InspectVendor(actor, npc, pending.actionId);
+                    reason = completed ? "vendor_catalog_published" : "vendor_inspection_rejected";
+                }
+                PublishActionResultEvent(requester, pending.actor, pending.actionId, pending.type,
+                    completed ? "accepted" : "rejected", reason);
+                iter = pendingNpcInteractions.erase(iter);
+                continue;
+            }
             if (!actor->IsWithinLOSInMap(npc) || !OpenNpcDialog(actor, npc, pending.actionId))
                 fail("npc_interaction_rejected");
             else
@@ -2496,6 +3394,8 @@ void UpdatePendingTypedActions()
         ++iter;
     }
 
+    UpdateDeferredVendorStrategyRestores();
+    UpdateVendorTravelTasks();
     UpdateAgentHuntTasks();
     UpdateAgentGuideTasks();
 }

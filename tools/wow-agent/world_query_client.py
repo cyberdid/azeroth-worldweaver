@@ -17,7 +17,7 @@ DEFAULT_TELEMETRY = Path(os.environ.get(
     "WOW_AGENT_TELEMETRY_DIR",
     Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "azeroth-worldweaver",
 ))
-OPERATIONS = ("creature", "gameobject", "spawns", "quest", "fishing", "loot", "item", "spell", "nearby")
+OPERATIONS = ("creature", "gameobject", "spawns", "quest", "fishing", "loot", "item", "spell", "vendors", "nearby")
 MAX_LIVE_SNAPSHOT_BYTES = 16 * 1024 * 1024
 MAX_LIVE_QUERY_ROWS = 50
 MAX_LIVE_QUERY_RESPONSE_BYTES = 32 * 1024
@@ -438,6 +438,7 @@ def main() -> int:
     parser.add_argument("operation", choices=OPERATIONS)
     parser.add_argument("--entry")
     parser.add_argument("--id")
+    parser.add_argument("--item-id")
     parser.add_argument("--name")
     parser.add_argument("--kind", choices=("creature", "gameobject"))
     parser.add_argument("--map-id")
@@ -465,12 +466,12 @@ def main() -> int:
         result = query_live_nearby(args, parsed.telemetry_dir)
     else:
         if (parsed.group_id is not None or parsed.session_id is not None or parsed.snapshot_seq is not None
-                or parsed.offset is not None or parsed.line_of_sight is not None
+                or (parsed.offset is not None and parsed.operation != "vendors") or parsed.line_of_sight is not None
                 or parsed.attackable_only or parsed.fishing_only):
             parser.error("live nearby filters are only valid with the nearby operation")
         args = {key: value for key, value in vars(parsed).items()
                 if key not in {"operation", "telemetry_dir", "group_id", "session_id", "snapshot_seq",
-                               "offset", "line_of_sight",
+                               "line_of_sight",
                                "attackable_only", "fishing_only"} and value is not None}
         result = submit(parsed.operation, args, parsed.telemetry_dir)
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))

@@ -17,7 +17,7 @@ The service publishes one credential-free, fixed-operation query client for both
 
 ## Actions and item handoff
 
-The adapters can return typed actions for supported playerbot operations: follow/stay, attack, cast a known active spell, use/equip an exact carried item, fishing, NPC menu interaction, guides, hunts, and item offers. The server validates each request and reports a correlated result. Ordinary conversation is not passed to SOAP as an arbitrary server command.
+The adapters can return typed actions for supported playerbot operations: follow/stay, attack, cast a known active spell, use/equip an exact carried item, fishing, NPC menu interaction, trainer inspect/learn, NPC travel, guides, hunts, and item offers. `vendor_runtime.py`/`vendor_tasks.py` run the bridge-local multi-step purchase (`vendor_task_start`) and trainer (`trainer_task_start`) tasks from observed server events. The server validates each request and reports a correlated result. Ordinary conversation is not passed to SOAP as an arbitrary server command.
 
 Hunts use live matching targets and server-validated map/zone/area constraints. Kills are credited by the server; the task controller opens normal corpse loot and waits for inventory results. `collect_loot` keeps drops in the bot's bags. `deliver_loot` is separate and must be explicitly requested. Trade uses the normal WoW trade window; only currently held, tradeable requested items are offered, within the six-slot limit, and the player confirms the exchange. No direct inventory edits or trade acceptance are exposed.
 
