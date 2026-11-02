@@ -82,6 +82,12 @@ class TrainerTasks(unittest.TestCase):
         self.assertEqual(updates[0]['reason'],'journey_route_stalled')
         self.assertEqual(self.calls[-1]['type'],'follow')
 
+    def test_requested_travel_mode_reaches_every_route(self):
+        self.start(travel_mode='fly')
+        self.poll();self.poll()
+        self.assertEqual(self.calls[-1]['type'],'vendor_travel')
+        self.assertEqual(self.calls[-1]['travel_mode'],'fly')
+
 
 class TrainerTaskProtocol(unittest.TestCase):
     def test_trainer_task_is_validated_and_kept_bridge_local(self):
@@ -91,6 +97,13 @@ class TrainerTaskProtocol(unittest.TestCase):
         self.assertIsNone(error);self.assertEqual(action['trainer_entry'],5150)
         with self.assertRaisesRegex(ValueError,'bridge_local_action'):
             client.build_action_command(action,sender='Test',group_id='1',action_id='0'*32)
+        flying=reply.replace('"map_id":0','"map_id":0,"travel_mode":"fly"')
+        self.assertIsNone(client.parse_action_response(flying,bot_name='Claude',allow_action=True)[2])
+        self.assertEqual(client.parse_action_response(reply.replace('"map_id":0','"map_id":0,"travel_mode":"swim"'),
+                                                      bot_name='Claude',allow_action=True)[2],'invalid_travel_mode')
+        travel=dict(actor='Claude',type='vendor_travel',map_id=0,position=[1.0,2.0,3.0],purchase_reserve_copper=0)
+        self.assertTrue(client.build_action_command(travel,sender='Test',group_id='1',action_id='0'*32).endswith(':0'))
+        self.assertTrue(client.build_action_command(dict(travel,travel_mode='fly'),sender='Test',group_id='1',action_id='0'*32).endswith(':0:2'))
         bad=reply.replace('"trainer_entry":5150','"trainer_entry":0')
         self.assertEqual(client.parse_action_response(bad,bot_name='Claude',allow_action=True)[2],'invalid_trainer_entry')
 

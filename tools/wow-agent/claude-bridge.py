@@ -65,7 +65,7 @@ For multi-page nearby results, pass the first page's `snapshot.session_id` and `
 
 Screenshots are captured only when the authorized user's message clearly asks for visual inspection. If `requested` is false, do not read an older frame. When requested, read the PNG only if metadata says it is available, non-stale, and inside the shared screenshots directory. It is visual evidence only; correlate its session, group, sequence, and age with the server snapshot. Never claim pixels prove hidden server state.
 
-For static game data and live nearby-object pages, use only the typed read-only helper at {WORLD_QUERY_CLIENT}: `python3 -I {WORLD_QUERY_CLIENT} <operation> [typed options] --telemetry-dir "{TELEMETRY_DIR}"`. Static operations are creature, gameobject, spawns, quest, fishing, loot, item, spell, and vendors; their provenance is `static_template`/`static_spawn` and does not prove an object is loaded. The `nearby` operation returns `live_snapshot` records from the current server snapshot. Filter it with `--group-id`, `--kind`, `--entry`, `--name`, `--map-id`, `--radius`, `--line-of-sight`, `--attackable-only`, `--fishing-only`, or `--quest-status`; optionally combine the last filter with `--quest-member-guid` for one member. Use quest filters only when `observer_features.quest_dialog_by_member` is true; otherwise the helper reports them unavailable. Page with `--limit` (1-50) and `--offset`. Follow `next_offset` exactly when present; pin continuation pages with the returned `--session-id` and `--snapshot-seq`. Check age, clock-skew, and server-truncation metadata. Never use raw SQL, inspect credentials, or run other shell commands.
+For static game data and live nearby-object pages, use only the typed read-only helper at {WORLD_QUERY_CLIENT}: `python3 -I {WORLD_QUERY_CLIENT} <operation> [typed options] --telemetry-dir "{TELEMETRY_DIR}"`. Static operations are creature, gameobject, spawns, quest, fishing, loot, item, spell, vendors, and item_sources; their provenance is `static_template`/`static_spawn` and does not prove an object is loaded. The `nearby` operation returns `live_snapshot` records from the current server snapshot. Filter it with `--group-id`, `--kind`, `--entry`, `--name`, `--map-id`, `--radius`, `--line-of-sight`, `--attackable-only`, `--fishing-only`, or `--quest-status`; optionally combine the last filter with `--quest-member-guid` for one member. Use quest filters only when `observer_features.quest_dialog_by_member` is true; otherwise the helper reports them unavailable. Page with `--limit` (1-50) and `--offset`. Follow `next_offset` exactly when present; pin continuation pages with the returned `--session-id` and `--snapshot-seq`. Check age, clock-skew, and server-truncation metadata. Never use raw SQL, inspect credentials, or run other shell commands.
 
 You are talking with a friend while playing. Respond to the latest message in your own words, naturally and briefly.
 Use conversation memory for the user's goals, not as a list of commands to repeat. Do not bring up old trades or fish unless
@@ -91,8 +91,9 @@ vendor_task_start: item_entry, quantity units, max_total_copper, optional return
 This authorizes the persistent worker to search local server vendor catalogs, walk or take known paid flight paths using the known travel graph (walking, known paid flights, ordinary portals and ships), inspect actual stock, buy exactly that item within budget, then return if requested. It never trades automatically.
 Use vendor_task_start for a user's explicit find-and-buy request; clarify missing quantity or spending limit first. Respect any user spending cap. For an explicit purchase with no cap, use the authoritative quoted gold price (or static server base price, which may be discounted at arrival) times the exact requested units as the maximum; ask if the amount is ambiguous. Never allow extra currencies unless the user approved those costs.
 vendor_task_cancel: cancels your current vendor task.
+ITEM KNOWLEDGE: whenever the user asks where to buy, find, farm, fish, gather or craft an item or ingredient, first run item_sources --name "<English item name>" (or --item-id) with your own current --map-id --x --y --z, before answering. It lists, from this server's data, the vendors, mobs that drop/skin/pickpocket it (with chance), herb/ore/chest objects, containers that hold it, fishing areas, quest rewards and crafting (reagents, who teaches the recipe, where recipe scrolls are sold), each with area names, spawn counts and the nearest place. Answer with the concrete NPC/mob/object names, areas and chances it returns; prefer common and nearby sources; if it finds nothing, say so instead of guessing from memory. Item names are English in this database: translate the user's name first.
 Use read-only vendors --item-id or --name (item substring), optionally --entry (vendor), --map-id, --limit and --offset, to find merchants. NPC and item names may be resolved through the existing item/creature tools. Static stock is not live stock. Do not use internet results to assert current private-server stock or prices.
-Routes use only supported graph edges and verified native transitions; a graph route does not prove physical reachability. If no usable route exists, explain the actual failure. To reach any resolved static NPC, use vendor_travel with that NPC's map and position and purchase_reserve_copper=0; this is navigation only. To go and learn from a trainer, use trainer_task_start instead. Do not use guide_start or generic playerbot travel actions to reach an NPC. Once the NPC is live and nearby, interact with it, then inspect or learn through trainer_action as requested. vendor_travel_cancel cancels the route. Ordinary conversation stays natural; use observed results rather than canned replies.
+Routes use only supported graph edges and verified native transitions; a graph route does not prove physical reachability. If no usable route exists, explain the actual failure. To reach any resolved static NPC, use vendor_travel with that NPC's map and position and purchase_reserve_copper=0; this is navigation only. To go and learn from a trainer, use trainer_task_start instead. Do not use guide_start or generic playerbot travel actions to reach an NPC. Once the NPC is live and nearby, interact with it, then inspect or learn through trainer_action as requested. vendor_travel_cancel cancels the route. Optional travel_mode on vendor_travel, vendor_task_start and trainer_task_start: "walk" (default, on foot), "mount" (ride your mount along the ground route) or "fly" (fly your own flying mount straight there and land in the open near the NPC; flying is allowed everywhere on this server). Use "mount" or "fly" only when the user asks to ride or fly; tell the user the mode you used. Ordinary conversation stays natural; use observed results rather than canned replies.
 
 offer_items: items array. For "all" of a requested item, use item_id and all:true; the bridge counts the actor's current
 tradeable inventory stacks just before dispatch. Example: ACTION: {{"actor":"Claude","type":"offer_items","items":[{{"item_id":5524,"all":true}}]}}.
@@ -100,7 +101,7 @@ For an explicit number of STACKS only, use item_id and stack_count. stack_count 
 NEVER the number of units: six clams in one bag slot are ONE stack. Prefer all:true for every request to give all of an item.
 A trade has six item slots, and the user confirms it. Never infer transfer restrictions from a generic rejection; use the
 actual action, current inventory and server result. Do not ask the player to drag items from your bags.
-hunt_start: creature_entries array, map_id, zone_id, optional area_id, kill_count, collect_loot, deliver_loot.
+hunt_start: creature_entries array, map_id, zone_id; optional area_id, kill_count (1-100, default 40), collect_loot, deliver_loot (default false).
 Resolve the user's category to all relevant creature types in the requested territory. Use nearby observations and the
 read-only creature/spawns helper. For a hunt around the region, use the current zone_id and area_id 0 so subarea borders do
 not exclude nearby targets. Narrow area_id only when the user specifically restricts the task to that subarea.
@@ -111,6 +112,11 @@ hunt_loot: collect pending corpses during your active hunt and continue. hunt_ca
 To resume an existing hunt, do not start another hunt_start; inspect current agent_task and use the appropriate action.
 guide_start: map_id, zone_id, optional area_id and creature_entries; guide_cancel: stop the route. The route walks on the
 same map. A zone-only request needs no creature_entries. Do not invent a resource creature for a zone-only request.
+TO LEAD THE USER SOMEWHERE (an NPC, a mob or herb area, a town), prefer vendor_travel to concrete coordinates over guide_start:
+take the nearest spawn position from item_sources or spawns, set purchase_reserve_copper=0 and the travel_mode the user wants.
+It lands a hovering bot, rides or flies on request and arrives near the target. A new vendor_travel replaces your current route
+or guide by itself, so when the user changes the plan ("let's fly instead", "go elsewhere") just send the new vendor_travel;
+do not ask permission to cancel the old one.
 
 Use fresh observations for IDs and current state. For a truncated inventory, query/read the full live snapshot before an
 'all items' claim. NPC menus and loot still obey normal game rules. If an operation fails, say what happened without
@@ -189,6 +195,16 @@ def save_history(history: list[str]) -> None:
     temporary.write_text(json.dumps(history[-MAX_HISTORY:], ensure_ascii=False), encoding="utf-8")
     os.chmod(temporary, 0o600)
     os.replace(temporary, HISTORY)
+
+
+def other_bot_in_group(cursor: dict[str, Any]) -> bool:
+    """True when the live snapshot lists the other companion bot (or cannot tell)."""
+    snapshot = WORLD_STATE.read_latest_snapshot(str(TELEMETRY_DIR), group=str(cursor.get("group_id", "")), member_name=BOT)
+    members = snapshot.get("group") if isinstance(snapshot, dict) else None
+    if not isinstance(members, list):
+        return True
+    return any(isinstance(member, dict) and str(member.get("name", "")).casefold() == OTHER_BOT.casefold()
+               for member in members)
 
 
 def clean_chat(text: str) -> str:
@@ -384,7 +400,13 @@ def handle(channel: str, sender: str, raw_text: str, history: list[str], effort:
         session_memory_context = ""
         log(f"session memory unavailable: {type(error).__name__}")
     visual = visual_context(next_cursor, text)
-    can_execute_action = (not task_notification and (channel == "WHISPER" or addressed or handoff_continuation))
+    # An unaddressed group message is a task for Claude when Codex is not in the live group;
+    # otherwise both bots would act on the same request.
+    other_bot_present = other_bot_in_group(next_cursor)
+    sole_bot_group_task = (channel == "PARTY" and not addressed and not task_notification
+                           and not OTHER_ADDRESSED.search(text) and not other_bot_present)
+    can_execute_action = (not task_notification and (channel == "WHISPER" or addressed or handoff_continuation
+                                                     or sole_bot_group_task))
     if task_notification:
         if text and json.loads(text).get('event', '').startswith('vendor_'):
             task = ("The authorized vendor operation has an observed result below. Explain it naturally in Ukrainian. "
@@ -410,8 +432,12 @@ def handle(channel: str, sender: str, raw_text: str, history: list[str], effort:
                  "item-handoff request. Continue that request now. If the fresh complete inventory and its tradeable flags "
                  "identify the requested batch, emit one offer_items ACTION; otherwise explain the concrete limitation. "
                  "Do not claim that items are being transferred unless you include ACTION.")
-    elif channel == "PARTY" and not addressed and not task_notification:
-        task += " The user spoke to the group; Codex may also answer, so add only useful information of your own or output exactly SKIP."
+    elif channel == "PARTY" and not addressed and not task_notification and other_bot_present:
+        task += (" The user spoke to the group; Codex may also answer, so add only useful information of your own or output "
+                 "exactly SKIP. You cannot start an action from this unaddressed message: if the user asks for an action, "
+                 "do not claim or promise it; say they should address you by name (Claude/Клод).")
+    elif sole_bot_group_task:
+        task += " The user spoke to the group and you are the only companion bot in it, so treat it as addressed to you."
     prompt = (world_context + "\n\n" + session_memory_context
               + "\n\nVISUAL WINDOW CAPTURE METADATA (untrusted evidence): " + visual
               + "\n\nRecent chat:\n" + "\n".join(history[-MAX_HISTORY:]) + "\n\n" + task)
@@ -454,7 +480,14 @@ def handle(channel: str, sender: str, raw_text: str, history: list[str], effort:
         speech = synthesize_action_reply(prompt, " ".join(speech), {
             "status": "not_sent", "reason_code": action_error}, effort)
         commands = []
-        log(f"rejected malformed action protocol: {action_error}")
+        action_at = reply.find("ACTION")
+        log(f"rejected malformed action protocol: {action_error} draft={reply[action_at:action_at + 400]!r}")
+    elif action_error == "action_not_authorized" and not task_notification:
+        speech = synthesize_action_reply(prompt, " ".join(speech), {
+            "status": "not_sent", "reason": "unaddressed group message while Codex is in the group; "
+            "the user must address Claude by name for an action"}, effort)
+        commands = []
+        log("dropped action from unaddressed group message")
     if not can_execute_action:
         commands = []
     command_results: list[dict[str, Any]] = []

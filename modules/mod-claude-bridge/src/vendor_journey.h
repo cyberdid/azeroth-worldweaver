@@ -21,6 +21,15 @@ struct VendorJourneyLocation
     float z = 0;
 };
 
+// How the bot covers ground legs: on foot, riding a mount along the ground
+// path, or flying its own mount straight to an open landing near the NPC.
+enum class VendorTravelMode : uint8
+{
+    Walk = 0,
+    Mount = 1,
+    Fly = 2,
+};
+
 // A local route contains walking/taxi coordinates on one world map. An intermap
 // route owns a validated graph plan of local legs and native portals/transports.
 // Estimates are planning hints, not guarantees of terrain reachability.
@@ -33,6 +42,7 @@ struct VendorJourneyRoute
     std::vector<uint32> taxiNodes;
     uint32 maximumFareCopper = 0; // full undiscounted route fare
     float estimatedSeconds = 0;
+    VendorTravelMode mode = VendorTravelMode::Walk;
 
     std::shared_ptr<VendorTransportPlan> transportPlan;
     bool UsesTaxi() const { return taxiNodes.size() >= 2; }
@@ -75,6 +85,7 @@ enum class VendorJourneyStage
     RidingTransport,
     DisembarkingTransport,
     WaitingPortal,
+    FlyingMounted,
     Arrived,
     Failed,
     Cancelled,
@@ -106,6 +117,10 @@ private:
     void Fail(Player* actor, char const* reason);
     void StopOwnedMovement(Player* actor);
     bool Walk(Player* actor, VendorJourneyLocation const& target, uint32 elapsedMs);
+    bool Land(Player* actor, uint32 elapsedMs);
+    bool TryMount(Player* actor, bool flying, uint32 elapsedMs);
+    void FlyOwnMount(Player* actor, uint32 elapsedMs);
+    void TouchDown(Player* actor, char const* reason);
 
     VendorJourneyRoute _route;
     std::unique_ptr<VendorTransportJourney> _transport;
@@ -118,6 +133,13 @@ private:
     uint32 _stalledMs = 0;
     uint32 _repathMs = 0;
     uint32 _boardingWaitMs = 0;
+    uint32 _landingMs = 0;
+    uint8 _mountAttempts = 0;
+    uint32 _mountWaitMs = 0;
+    uint8 _flightLeg = 0;
+    bool _hasLanding = false;
+    bool _takenOff = false;
+    VendorJourneyLocation _landing;
     VendorJourneyLocation _lastPosition;
     bool _hasLastPosition = false;
     bool _ownsMovement = false;

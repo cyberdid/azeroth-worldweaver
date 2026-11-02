@@ -766,6 +766,298 @@ def _vendors(args: dict[str, Any], limit: int, config_path: str) -> dict[str, An
             "results": page, "truncated": more or cycle or depth_limit}
 
 
+_GAME_DATA = None
+
+
+def _game_data():
+    global _GAME_DATA
+    if _GAME_DATA is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("wow_agent_game_data", Path(__file__).with_name("game_data.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _GAME_DATA = module
+    return _GAME_DATA
+
+
+def _data_dir(config_path: str) -> str | None:
+    try:
+        for line in Path(config_path).read_text(encoding="utf-8").splitlines():
+            match = re.match(r'^\s*DataDir\s*=\s*"?([^"#]*?)"?\s*$', line)
+            if match and match.group(1):
+                return match.group(1)
+    except (OSError, UnicodeError):
+        pass
+    return None
+
+
+# Item ids that may contain the item: drops listed directly or through
+# reference tables (shared loot pools), up to three levels deep.
+_ITEM_REFS_CTE = """WITH RECURSIVE refs AS (
+    SELECT Entry AS ref, Chance AS chance, 0 AS depth FROM reference_loot_template WHERE Item = ? AND Reference = 0
+    UNION ALL
+    SELECT p.Entry, refs.chance, refs.depth + 1 FROM reference_loot_template p JOIN refs ON p.Reference = refs.ref
+    WHERE refs.depth < 3
+) """
+
+
+def _loot_holders(table: str, item_id: int) -> str:
+    return f"""SELECT lt.Entry AS loot, lt.Chance AS chance, lt.QuestRequired AS quest, 0 AS via
+        FROM {table} lt WHERE lt.Item = {item_id} AND lt.Reference = 0
+        UNION ALL SELECT lt.Entry, refs.chance, 0, 1 FROM {table} lt JOIN refs ON lt.Reference = refs.ref"""
+
+
+def _place(data_dir: str | None, map_id: int, x: float, y: float, zone_id: int, area_id: int) -> str | None:
+    """Area name from the server's spawn columns, else from the terrain under it."""
+    if not data_dir:
+        return None
+    game = _game_data()
+    try:
+        return game.area_label(data_dir, area_id or zone_id or game.area_at(data_dir, map_id, x, y))
+    except (OSError, ValueError):
+        return None
+
+
+def _map_name(data_dir: str | None, map_id: int) -> str:
+    try:
+        return (_game_data().maps(data_dir).get(map_id) if data_dir else None) or f"map {map_id}"
+    except (OSError, ValueError):
+        return f"map {map_id}"
+
+
+def _spawn_summary(kind: str, entries: list[int], near: tuple[int, float, float, float] | None,
+                   data_dir: str | None, config_path: str) -> dict[int, dict[str, Any]]:
+    """Per entry: spawn count, busiest areas and the spawn nearest to `near`."""
+    if not entries:
+        return {}
+    table = "creature" if kind == "creature" else "gameobject"
+    column = _creature_spawn_entry_column(config_path) if kind == "creature" else "id"
+    placeholders = ", ".join("?" for _ in entries)
+    rows = _mysql_rows(f"""SELECT JSON_OBJECT('entry', s.{column}, 'map_id', s.map, 'zone_id', s.zoneId,
+        'area_id', s.areaId, 'x', s.position_x, 'y', s.position_y, 'z', s.position_z)
+        FROM {table} s WHERE s.{column} IN ({placeholders}) LIMIT 6000""", list(entries), config_path)
+    summary: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        entry = row["entry"]
+        item = summary.setdefault(entry, {"spawn_count": 0, "areas": {}, "nearest": None})
+        item["spawn_count"] += 1
+        place = _place(data_dir, row["map_id"], row["x"], row["y"], row["zone_id"], row["area_id"])
+        key = place or _map_name(data_dir, row["map_id"])
+        item["areas"][key] = item["areas"].get(key, 0) + 1
+        distance = None
+        if near and near[0] == row["map_id"]:
+            distance = math.dist(near[1:], (row["x"], row["y"], row["z"]))
+        current = item["nearest"]
+        if current is None or (distance is not None and (current["distance_yards"] is None
+                                                          or distance < current["distance_yards"])):
+            item["nearest"] = {"map_id": row["map_id"], "map": _map_name(data_dir, row["map_id"]), "area": place,
+                               "position": [round(row["x"], 1), round(row["y"], 1), round(row["z"], 1)],
+                               "distance_yards": round(distance) if distance is not None else None}
+    for item in summary.values():
+        top = sorted(item["areas"].items(), key=lambda pair: -pair[1])[:4]
+        item["areas"] = [{"area": name, "spawns": count} for name, count in top]
+    return summary
+
+
+def _sources_with_spawns(kind: str, rows: list[dict[str, Any]], near, data_dir, limit: int,
+                         config_path: str) -> tuple[list[dict[str, Any]], bool]:
+    spawns = _spawn_summary(kind, sorted({row["entry"] for row in rows})[:200], near, data_dir, config_path)
+    for row in rows:
+        row.update(spawns.get(row["entry"], {"spawn_count": 0, "areas": [], "nearest": None}))
+
+    def order(row):
+        # Spawned sources first, then a useful drop rate (0 = equal share of a
+        # loot group), then the nearest; rare drops only after common ones.
+        nearest = row["nearest"] or {}
+        distance = nearest.get("distance_yards")
+        chance = row.get("chance_pct") or 0
+        tier = 0 if chance >= 10 or chance == 0 else 1 if chance >= 1 else 2
+        return (row["spawn_count"] == 0, tier, distance is None, distance or 0, -chance, -row["spawn_count"])
+    rows.sort(key=order)
+    return rows[:limit], len(rows) > limit
+
+
+def _item_sources(args: dict[str, Any], limit: int, config_path: str) -> dict[str, Any]:
+    """Every configured way to obtain an item, with readable places."""
+    if set(args) - {"item_id", "name", "map_id", "x", "y", "z", "limit"}:
+        raise QueryInputError("unsupported_filter")
+    limit = min(limit, 8)
+    near = None
+    if all(args.get(key) is not None for key in ("map_id", "x", "y", "z")):
+        try:
+            near = (_identifier(args["map_id"], "map_id", maximum=65535, allow_zero=True),
+                    float(args["x"]), float(args["y"]), float(args["z"]))
+        except (TypeError, ValueError, OverflowError) as error:
+            raise QueryInputError("invalid_coordinates") from error
+    item_columns = """JSON_OBJECT('item_id', entry, 'name', name, 'quality', Quality, 'item_level', ItemLevel,
+        'required_level', RequiredLevel, 'class', class, 'buy_price_copper', BuyPrice,
+        'sell_price_copper', SellPrice, 'stack_size', stackable)"""
+    if args.get("item_id") is not None:
+        items = _mysql_rows(f"SELECT {item_columns} FROM item_template WHERE entry = ?",
+                            [_identifier(args["item_id"], "item_id")], config_path)
+    elif args.get("name") is not None:
+        name = _name(args)
+        items = _mysql_rows(f"SELECT {item_columns} FROM item_template WHERE name = ? LIMIT 3", [name], config_path)
+        if not items:
+            items = _mysql_rows(f"SELECT {item_columns} FROM item_template WHERE LOCATE(?, name) > 0 "
+                                "ORDER BY LENGTH(name), entry LIMIT 3", [name], config_path)
+    else:
+        raise QueryInputError("item_sources_requires_item_id_or_name")
+    data_dir = _data_dir(config_path)
+    results = []
+    truncated = False
+    for item in items:
+        item_id = int(item["item_id"])
+        block: dict[str, Any] = {"item": item}
+
+        offers = _vendors({"item_id": item_id, "limit": 40}, 40, config_path)["results"]
+        vendors: dict[Any, dict[str, Any]] = {}
+        for offer in offers:
+            if offer.get("position") is None:
+                continue
+            x, y, z = offer["position"]
+            distance = (round(math.dist(near[1:], (x, y, z)))
+                        if near and near[0] == offer["map_id"] else None)
+            key = (offer["vendor_entry"], offer.get("spawn_guid"))
+            vendors[key] = {"vendor": offer["vendor_name"], "vendor_entry": offer["vendor_entry"],
+                            "map_id": offer["map_id"], "position": [round(x, 1), round(y, 1), round(z, 1)],
+                            "area": _place(data_dir, offer["map_id"], x, y, offer.get("zone_id") or 0,
+                                           offer.get("area_id") or 0),
+                            "distance_yards": distance, "price_copper": offer.get("base_buy_price_copper"),
+                            "limited_stock": offer.get("maxcount") or None,
+                            "extended_cost_id": offer.get("extended_cost_id") or None}
+        ordered = sorted(vendors.values(), key=lambda v: (v["distance_yards"] is None, v["distance_yards"] or 0))
+        block["vendors"] = ordered[:limit]
+        truncated = truncated or len(ordered) > limit
+
+        by_method = " UNION ALL ".join(
+            f"""SELECT '{method}' AS method, ct.entry, ct.name, ct.minlevel, ct.maxlevel, ct.`rank` AS elite,
+                h.chance, h.quest, h.via FROM ({_loot_holders(table, item_id)}) h
+                JOIN creature_template ct ON ct.{column} = h.loot"""
+            for method, table, column in (("drop", "creature_loot_template", "lootid"),
+                                          ("skinning", "skinning_loot_template", "skinloot"),
+                                          ("pickpocket", "pickpocketing_loot_template", "pickpocketloot")))
+        creature_rows = _mysql_rows(_ITEM_REFS_CTE + f"""SELECT JSON_OBJECT('method', d.method, 'entry', d.entry,
+            'name', d.name, 'min_level', d.minlevel, 'max_level', d.maxlevel, 'elite_rank', d.elite,
+            'chance_pct', MAX(d.chance), 'quest_required', MAX(d.quest), 'via_reference', MAX(d.via))
+            FROM ({by_method}) d
+            GROUP BY d.method, d.entry, d.name, d.minlevel, d.maxlevel, d.elite
+            ORDER BY MAX(d.chance) DESC LIMIT 300""", [item_id], config_path)
+        block["creatures"], cut = _sources_with_spawns("creature", creature_rows, near, data_dir, limit, config_path)
+        truncated = truncated or cut
+
+        object_rows = _mysql_rows(_ITEM_REFS_CTE + f"""SELECT JSON_OBJECT('entry', gt.entry, 'name', gt.name,
+            'object_type', gt.type, 'chance_pct', MAX(d.chance), 'quest_required', MAX(d.quest))
+            FROM ({_loot_holders('gameobject_loot_template', item_id)}) d
+            JOIN gameobject_template gt ON gt.Data1 = d.loot AND gt.type IN (3, 25)
+            GROUP BY gt.entry, gt.name, gt.type ORDER BY MAX(d.chance) DESC LIMIT 200""", [item_id], config_path)
+        block["objects"], cut = _sources_with_spawns("gameobject", object_rows, near, data_dir, limit, config_path)
+        truncated = truncated or cut
+
+        block["containers"] = _mysql_rows(_ITEM_REFS_CTE + f"""SELECT JSON_OBJECT('item_id', it.entry,
+            'name', it.name, 'chance_pct', MAX(d.chance))
+            FROM ({_loot_holders('item_loot_template', item_id)}) d
+            JOIN item_template it ON it.entry = d.loot GROUP BY it.entry, it.name
+            ORDER BY MAX(d.chance) DESC LIMIT ?""", [item_id, limit], config_path)
+
+        fishing = _mysql_rows(_ITEM_REFS_CTE + f"""SELECT JSON_OBJECT('area_id', d.loot, 'chance_pct', MAX(d.chance))
+            FROM ({_loot_holders('fishing_loot_template', item_id)}) d
+            GROUP BY d.loot ORDER BY MAX(d.chance) DESC LIMIT ?""", [item_id, limit], config_path)
+        for row in fishing:
+            row["area"] = _game_data().area_label(data_dir, row["area_id"]) if data_dir else None
+        block["fishing"] = fishing
+
+        reward_columns = " OR ".join([f"q.RewardItem{i} = ?" for i in range(1, 5)]
+                                     + [f"q.RewardChoiceItemID{i} = ?" for i in range(1, 7)])
+        quests = _mysql_rows(f"""SELECT JSON_OBJECT('quest_id', q.ID, 'title', q.LogTitle, 'level', q.QuestLevel,
+            'min_level', q.MinLevel, 'starter_entries', (SELECT JSON_ARRAYAGG(qs.id) FROM creature_queststarter qs
+                WHERE qs.quest = q.ID))
+            FROM quest_template q WHERE {reward_columns} LIMIT ?""", [item_id] * 10 + [limit], config_path)
+        starters = sorted({entry for quest in quests for entry in (quest.get("starter_entries") or [])})[:40]
+        starter_names = {row["entry"]: row["name"] for row in _mysql_rows(
+            f"SELECT JSON_OBJECT('entry', entry, 'name', name) FROM creature_template WHERE entry IN "
+            f"({', '.join('?' for _ in starters)})", starters, config_path)} if starters else {}
+        starter_spawns = _spawn_summary("creature", starters, near, data_dir, config_path)
+        for quest in quests:
+            quest["starters"] = [{"name": starter_names.get(entry), "nearest": starter_spawns.get(entry, {}).get("nearest")}
+                                 for entry in (quest.pop("starter_entries", None) or [])][:3]
+        block["quests"] = quests
+
+        recipes = _game_data().crafting_recipes(data_dir, item_id)[:4] if data_dir else []
+        if recipes:
+            spell_ids = [recipe["spell_id"] for recipe in recipes]
+            reagent_ids = sorted({reagent for recipe in recipes for reagent, _count in recipe["reagents"]})
+            reagent_names = {row["entry"]: row["name"] for row in _mysql_rows(
+                f"SELECT JSON_OBJECT('entry', entry, 'name', name) FROM item_template WHERE entry IN "
+                f"({', '.join('?' for _ in reagent_ids)})", reagent_ids, config_path)} if reagent_ids else {}
+            spell_marks = ", ".join("?" for _ in spell_ids)
+            teachers = _mysql_rows(f"""SELECT JSON_OBJECT('spell_id', ts.SpellId, 'entry', ct.entry, 'name', ct.name,
+                'subname', ct.subname, 'req_skill_rank', ts.ReqSkillRank, 'cost_copper', ts.MoneyCost)
+                FROM trainer_spell ts JOIN creature_default_trainer cdt ON cdt.TrainerId = ts.TrainerId
+                JOIN creature_template ct ON ct.entry = cdt.CreatureId
+                WHERE ts.SpellId IN ({spell_marks}) LIMIT 60""", spell_ids, config_path)
+            teacher_spawns = _spawn_summary("creature", sorted({t["entry"] for t in teachers})[:40], near,
+                                            data_dir, config_path)
+            recipe_items = _mysql_rows(f"""SELECT JSON_OBJECT('spell_id', IF(spellid_2 IN ({spell_marks}), spellid_2,
+                spellid_1), 'item_id', entry, 'name', name) FROM item_template
+                WHERE spellid_2 IN ({spell_marks}) OR spellid_1 IN ({spell_marks}) LIMIT 10""",
+                spell_ids * 3, config_path)
+            crafting = []
+            for recipe in recipes:
+                taught = [t for t in teachers if t["spell_id"] == recipe["spell_id"]]
+                for teacher in taught:
+                    teacher["nearest"] = teacher_spawns.get(teacher["entry"], {}).get("nearest")
+                taught.sort(key=lambda t: ((t["nearest"] or {}).get("distance_yards") is None,
+                                           (t["nearest"] or {}).get("distance_yards") or 0))
+                learned_from = []
+                for scroll in [r for r in recipe_items if r["spell_id"] == recipe["spell_id"]][:2]:
+                    sold = _vendors({"item_id": scroll["item_id"], "limit": 5}, 5, config_path)["results"]
+                    learned_from.append({"recipe_item_id": scroll["item_id"], "recipe_item": scroll["name"],
+                                         "sold_by": [{"vendor": s["vendor_name"], "map_id": s["map_id"],
+                                                      "position": s["position"],
+                                                      "area": _place(data_dir, s["map_id"], *s["position"][:2],
+                                                                     s.get("zone_id") or 0, s.get("area_id") or 0)}
+                                                     for s in sold if s.get("position")][:3]})
+                crafting.append({
+                    "spell_id": recipe["spell_id"], "recipe": recipe["spell_name"], "profession": recipe["skill_name"],
+                    "skill_required": (taught[0]["req_skill_rank"] if taught else None) or recipe["skill_min_rank"],
+                    "skill_ups_yellow_from": recipe["skill_yellow_at"], "skill_ups_end_at": recipe["skill_grey_at"],
+                    "reagents": [{"item_id": reagent, "name": reagent_names.get(reagent), "count": count}
+                                 for reagent, count in recipe["reagents"]],
+                    "taught_by": [{"name": t["name"], "subname": t["subname"], "cost_copper": t["cost_copper"],
+                                   "nearest": t["nearest"]} for t in taught[:3]],
+                    "recipe_items": learned_from,
+                })
+            block["crafting"] = crafting
+        else:
+            block["crafting"] = []
+        results.append(block)
+    return {"operation": "item_sources", "provenance": "static_spawn",
+            "scope": ("configured server data: vendors, loot tables (chances are per-table, a reference chance "
+                      "is within its shared pool), quest rewards and client recipes; live stock, respawns and "
+                      "rare spawns are not observed"),
+            "area_source": "server spawn zone if set, else terrain map (city interiors report the outer zone)",
+            "results": results, "truncated": truncated}
+
+
+def _bounded_sources(result: dict[str, Any]) -> dict[str, Any]:
+    """Trim the longest source lists until the answer fits the relay limit."""
+    def size() -> int:
+        return len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    while size() > MAX_OUTPUT_BYTES:
+        lists = [(len(block[key]), block, key) for block in result["results"]
+                 for key in ("creatures", "objects", "vendors", "quests", "crafting", "containers", "fishing")
+                 if block.get(key)]
+        if not lists:
+            result["results"] = result["results"][:1]
+            result["truncated"] = True
+            break
+        _length, block, key = max(lists, key=lambda entry: entry[0])
+        block[key].pop()
+        result["truncated"] = True
+    return result
+
+
 def _bounded_result(result: dict[str, Any]) -> dict[str, Any]:
     result["truncated"] = bool(result.get("truncated", False))
     while len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > MAX_OUTPUT_BYTES:
@@ -786,7 +1078,8 @@ def run_query(operation: str, args: dict[str, Any], config_path: str = DEFAULT_C
     provenance = "static_spawn" if operation in {"spawns", "vendors"} else "static_template"
     if operation == "fishing":
         provenance = "mixed_static"
-    if operation not in {"creature", "gameobject", "item", "quest", "spell", "spawns", "loot", "fishing", "vendors"}:
+    if operation not in {"creature", "gameobject", "item", "quest", "spell", "spawns", "loot", "fishing", "vendors",
+                         "item_sources"}:
         return {"operation": str(operation)[:40], "provenance": "none", "results": [], "truncated": False,
                 "error": "unknown_operation"}
     reference_resolution_truncated = False
@@ -795,6 +1088,8 @@ def run_query(operation: str, args: dict[str, Any], config_path: str = DEFAULT_C
         limit = _limit(args)
         if operation == "vendors":
             return _bounded_result(_vendors(args, limit, config_path))
+        if operation == "item_sources":
+            return _bounded_sources(_item_sources(args, limit, config_path))
         if operation in {"creature", "gameobject", "item", "quest"}:
             rows = _lookup_template(operation, args, limit, config_path)
             truncated = len(rows) > limit
@@ -841,7 +1136,8 @@ def run_query(operation: str, args: dict[str, Any], config_path: str = DEFAULT_C
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("creature", "gameobject", "spawns", "quest", "fishing", "loot", "item", "spell", "vendors"))
+    parser.add_argument("operation", choices=("creature", "gameobject", "spawns", "quest", "fishing", "loot", "item", "spell", "vendors",
+                                              "item_sources"))
     parser.add_argument("--config", default=DEFAULT_CONFIG, help=argparse.SUPPRESS)
     parser.add_argument("--entry")
     parser.add_argument("--id")

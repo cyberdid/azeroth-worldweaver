@@ -172,6 +172,11 @@ class VendorTasks:
         self.transition('approach')
         return []
 
+    def travel_args(self):
+        # Walk unless the user asked to ride or fly for this task.
+        mode=self.state['action'].get('travel_mode','walk')
+        return {} if mode=='walk' else {'travel_mode':mode}
+
     def live_trainers(self, snap, actor):
         entry=self.state['action']['trainer_entry']
         live=[o for o in snap.get('nearby',[]) if o.get('entry')==entry and 'trainer' in o.get('npc_roles',[])
@@ -261,7 +266,7 @@ class VendorTasks:
                     result=self.send('stay');self.transition('inspect')
                 else:
                     result=self.send('vendor_travel',map_id=vendor['map_id'],position=vendor['position'],
-                                     purchase_reserve_copper=action['max_total_copper'])
+                                     purchase_reserve_copper=action['max_total_copper'],**self.travel_args())
                     self.transition('journey')
                 if result.get('status')!='accepted':
                     return self.finish('vendor_task_failed',result.get('reason_code','action_failed'),result)
@@ -305,7 +310,7 @@ class VendorTasks:
                     state['purchase']=evidence
                     if not action.get('return_to_user',True):
                         return self.finish('vendor_task_completed','purchase_confirmed',evidence)
-                    result=self.send('vendor_travel',map_id=user['map_id'],position=user['position'],purchase_reserve_copper=0)
+                    result=self.send('vendor_travel',map_id=user['map_id'],position=user['position'],purchase_reserve_copper=0,**self.travel_args())
                     if result.get('status')!='accepted':
                         return self.finish('vendor_task_completed','purchased_return_not_started',evidence)
                     self.transition('return')
@@ -337,7 +342,7 @@ class VendorTasks:
                     # Walk to the live trainer when it is visible; its static spawn
                     # point only locates it and may differ from where it stands.
                     position=live[0]['position'] if live else action['position']
-                    result=self.send('vendor_travel',map_id=action['map_id'],position=list(position),purchase_reserve_copper=0)
+                    result=self.send('vendor_travel',map_id=action['map_id'],position=list(position),purchase_reserve_copper=0,**self.travel_args())
                     if result.get('status')!='accepted':
                         return self.finish('vendor_task_failed',result.get('reason_code','route_rejected'),result)
                     self.transition('trainer_journey')

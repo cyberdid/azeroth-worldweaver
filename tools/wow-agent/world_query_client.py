@@ -17,7 +17,8 @@ DEFAULT_TELEMETRY = Path(os.environ.get(
     "WOW_AGENT_TELEMETRY_DIR",
     Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "azeroth-worldweaver",
 ))
-OPERATIONS = ("creature", "gameobject", "spawns", "quest", "fishing", "loot", "item", "spell", "vendors", "nearby")
+OPERATIONS = ("creature", "gameobject", "spawns", "quest", "fishing", "loot", "item", "spell", "vendors", "item_sources",
+              "nearby")
 MAX_LIVE_SNAPSHOT_BYTES = 16 * 1024 * 1024
 MAX_LIVE_QUERY_ROWS = 50
 MAX_LIVE_QUERY_RESPONSE_BYTES = 32 * 1024

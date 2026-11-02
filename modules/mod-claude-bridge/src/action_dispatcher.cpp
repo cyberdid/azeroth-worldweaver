@@ -154,6 +154,7 @@ namespace
     {
         VendorJourneyLocation destination;
         uint32 purchaseReserveCopper = 0;
+        VendorTravelMode mode = VendorTravelMode::Walk;
     };
 
     struct VendorTravelTask
@@ -434,7 +435,12 @@ namespace
             return parsed.ec == std::errc{} && parsed.ptr == field.data() + field.size()
                 && std::isfinite(result) && std::abs(result) < 17066.0f;
         };
-        return fields.size() == 5 && ParseInteger(fields[0], request.destination.mapId)
+        // Optional sixth field: travel mode 0 walk, 1 ride a mount, 2 fly.
+        uint32 mode = 0;
+        if (fields.size() == 6 && (!ParseInteger(fields[5], mode) || mode > 2))
+            return false;
+        request.mode = static_cast<VendorTravelMode>(mode);
+        return (fields.size() == 5 || fields.size() == 6) && ParseInteger(fields[0], request.destination.mapId)
             && parseCoordinate(fields[1], request.destination.x) && parseCoordinate(fields[2], request.destination.y)
             && parseCoordinate(fields[3], request.destination.z) && ParseInteger(fields[4], request.purchaseReserveCopper)
             && request.purchaseReserveCopper <= MAX_MONEY_AMOUNT;
@@ -2383,6 +2389,19 @@ ActionResult DispatchTypedAction(std::string const& actorName, std::string const
     }
 
     auto existingJourney = vendorTravelTasks.find(Lower(actorName));
+    // The user's new route (e.g. "fly there" after a walk) replaces the old
+    // one, unless the bot is aboard a native flight or ship right now.
+    if (existingJourney != vendorTravelTasks.end() && isVendorTravel
+        && !actor->HasUnitState(UNIT_STATE_IN_FLIGHT) && !actor->GetTransport()
+        && !existingJourney->second->journey->IsNativeTransferPending())
+    {
+        VendorTravelTask& task = *existingJourney->second;
+        task.journey->Cancel(actor);
+        RestoreVendorTravelStrategies(actor, task);
+        PublishVendorTravelUpdate(task, actor, "failed", "journey_replaced");
+        vendorTravelTasks.erase(existingJourney);
+        existingJourney = vendorTravelTasks.end();
+    }
     if (existingJourney != vendorTravelTasks.end() && !isVendorTravelCancel)
     {
         result.reasonCode = "vendor_journey_busy";
@@ -2448,7 +2467,9 @@ ActionResult DispatchTypedAction(std::string const& actorName, std::string const
             result.reasonCode = "journey_actor_unavailable";
             return Finish(requester, std::move(result), true);
         }
-        if (actor->HasUnitState(UNIT_STATE_IN_FLIGHT) || actor->IsFlying())
+        // A bot hovering after its flying master lands first (VendorJourney::Land);
+        // only a native taxi flight in progress blocks a new route.
+        if (actor->HasUnitState(UNIT_STATE_IN_FLIGHT))
         {
             result.reasonCode = "journey_world_ground_route_required";
             return Finish(requester, std::move(result), true);
@@ -2462,20 +2483,42 @@ ActionResult DispatchTypedAction(std::string const& actorName, std::string const
             std::lock_guard<std::mutex> lock(agentHuntMutex);
             auto hunt = agentHuntTasks.find(Lower(actorName));
             auto guide = agentGuideTasks.find(Lower(actorName));
-            if ((hunt != agentHuntTasks.end() && IsAgentHuntActive(*hunt->second))
-                || (guide != agentGuideTasks.end() && IsAgentGuideActive(*guide->second)))
+            if (hunt != agentHuntTasks.end() && IsAgentHuntActive(*hunt->second))
             {
                 result.reasonCode = "actor_task_busy";
                 return Finish(requester, std::move(result), true);
             }
+            // A route request supersedes an older guide to the same user.
+            if (guide != agentGuideTasks.end() && IsAgentGuideActive(*guide->second))
+            {
+                ResetAgentGuideTravel(actor, botAI, *guide->second, false);
+                guide->second->stage = AgentGuideStage::Cancelled;
+                guide->second->destination.reset();
+            }
         }
-        VendorJourneyPlan const plan = PlanVendorJourney(actor, vendorTravelRequest.destination,
+        VendorJourneyPlan plan = PlanVendorJourney(actor, vendorTravelRequest.destination,
             vendorTravelRequest.purchaseReserveCopper);
         if (plan.candidates.empty())
         {
             result.reasonCode = plan.reasonCode;
             return Finish(requester, std::move(result), true);
         }
+        if (vendorTravelRequest.mode == VendorTravelMode::Fly
+            && vendorTravelRequest.destination.mapId == actor->GetMapId())
+        {
+            // Own flight replaces flight paths with one direct route; without a
+            // flying mount or open landing it continues riding on the ground.
+            VendorJourneyRoute direct;
+            direct.destination = vendorTravelRequest.destination;
+            direct.mode = VendorTravelMode::Fly;
+            direct.estimatedSeconds = actor->GetExactDist(direct.destination.x, direct.destination.y,
+                direct.destination.z) / std::max(1.0f, actor->GetSpeed(MOVE_FLIGHT));
+            plan.candidates.assign(1, direct);
+            plan.reasonCode = "journey_own_flight_planned";
+        }
+        else if (vendorTravelRequest.mode != VendorTravelMode::Walk)
+            for (VendorJourneyRoute& route : plan.candidates)
+                route.mode = VendorTravelMode::Mount;
         auto task = std::make_unique<VendorTravelTask>();
         task->actor = actorName;
         task->requester = requesterName;

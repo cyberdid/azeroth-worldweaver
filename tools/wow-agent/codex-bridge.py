@@ -187,8 +187,9 @@ vendor_task_start: item_entry, quantity units, max_total_copper, optional return
 This authorizes the persistent worker to search local server vendor catalogs, walk or take known paid flight paths using the known travel graph (walking, known paid flights, ordinary portals and ships), inspect actual stock, buy exactly that item within budget, then return if requested. It never trades automatically.
 Use vendor_task_start for a user's explicit find-and-buy request; clarify missing quantity or spending limit first. Respect any user spending cap. For an explicit purchase with no cap, use the authoritative quoted gold price (or static server base price, which may be discounted at arrival) times the exact requested units as the maximum; ask if the amount is ambiguous. Never allow extra currencies unless the user approved those costs.
 vendor_task_cancel: cancels your current vendor task.
+ITEM KNOWLEDGE: whenever the user asks where to buy, find, farm, fish, gather or craft an item or ingredient, first run item_sources --name "<English item name>" (or --item-id) with your own current --map-id --x --y --z, before answering. It lists, from this server's data, the vendors, mobs that drop/skin/pickpocket it (with chance), herb/ore/chest objects, containers that hold it, fishing areas, quest rewards and crafting (reagents, who teaches the recipe, where recipe scrolls are sold), each with area names, spawn counts and the nearest place. Answer with the concrete NPC/mob/object names, areas and chances it returns; prefer common and nearby sources; if it finds nothing, say so instead of guessing from memory. Item names are English in this database: translate the user's name first.
 Use read-only vendors --item-id or --name (item substring), optionally --entry (vendor), --map-id, --limit and --offset, to find merchants. NPC and item names may be resolved through the existing item/creature tools. Static stock is not live stock. Do not use internet results to assert current private-server stock or prices.
-Routes use only supported graph edges and verified native transitions; a graph route does not prove physical reachability. If no usable route exists, explain the actual failure. To reach any resolved static NPC, use vendor_travel with that NPC's map and position and purchase_reserve_copper=0; this is navigation only. To go and learn from a trainer, use trainer_task_start instead. Do not use guide_start or generic playerbot travel actions to reach an NPC. Once the NPC is live and nearby, interact with it, then inspect or learn through trainer_action as requested. vendor_travel_cancel cancels the route. Ordinary conversation stays natural; use observed results rather than canned replies.
+Routes use only supported graph edges and verified native transitions; a graph route does not prove physical reachability. If no usable route exists, explain the actual failure. To reach any resolved static NPC, use vendor_travel with that NPC's map and position and purchase_reserve_copper=0; this is navigation only. To go and learn from a trainer, use trainer_task_start instead. Do not use guide_start or generic playerbot travel actions to reach an NPC. Once the NPC is live and nearby, interact with it, then inspect or learn through trainer_action as requested. vendor_travel_cancel cancels the route. Optional travel_mode on vendor_travel, vendor_task_start and trainer_task_start: "walk" (default, on foot), "mount" (ride your mount along the ground route) or "fly" (fly your own flying mount straight there and land in the open near the NPC; flying is allowed everywhere on this server). Use "mount" or "fly" only when the user asks to ride or fly; tell the user the mode you used. Ordinary conversation stays natural; use observed results rather than canned replies.
 
 offer_items: items array. For "all" of a requested item, use item_id and all:true; the bridge counts the actor's current
 tradeable inventory stacks just before dispatch. Example: ACTION: {{"actor":"Codex","type":"offer_items","items":[{{"item_id":5524,"all":true}}]}}.
@@ -196,7 +197,7 @@ For an explicit number of STACKS only, use item_id and stack_count. stack_count 
 NEVER the number of units: six clams in one bag slot are ONE stack. Prefer all:true for every request to give all of an item.
 A trade has six item slots, and the user confirms it. Never infer transfer restrictions from a generic rejection; use the
 actual action, current inventory and server result. Do not ask the player to drag items from your bags.
-hunt_start: creature_entries array, map_id, zone_id, optional area_id, kill_count, collect_loot, deliver_loot.
+hunt_start: creature_entries array, map_id, zone_id; optional area_id, kill_count (1-100, default 40), collect_loot, deliver_loot (default false).
 Resolve the user's category to all relevant creature types in the requested territory. Use nearby observations and the
 read-only creature/spawns helper. For a hunt around the region, use the current zone_id and area_id 0 so subarea borders do
 not exclude nearby targets. Narrow area_id only when the user specifically restricts the task to that subarea.
@@ -207,6 +208,11 @@ hunt_loot: collect pending corpses during your active hunt and continue. hunt_ca
 To resume an existing hunt, do not start another hunt_start; inspect current agent_task and use the appropriate action.
 guide_start: map_id, zone_id, optional area_id and creature_entries; guide_cancel: stop the route. The route walks on the
 same map. A zone-only request needs no creature_entries. Do not invent a resource creature for a zone-only request.
+TO LEAD THE USER SOMEWHERE (an NPC, a mob or herb area, a town), prefer vendor_travel to concrete coordinates over guide_start:
+take the nearest spawn position from item_sources or spawns, set purchase_reserve_copper=0 and the travel_mode the user wants.
+It lands a hovering bot, rides or flies on request and arrives near the target. A new vendor_travel replaces your current route
+or guide by itself, so when the user changes the plan ("let's fly instead", "go elsewhere") just send the new vendor_travel;
+do not ask permission to cancel the old one.
 
 Use fresh observations for IDs and current state. For a truncated inventory, query/read the full live snapshot before an
 'all items' claim. NPC menus and loot still obey normal game rules. If an operation fails, say what happened without
@@ -430,7 +436,7 @@ def handle(model, effort, channel, sender, text, history):
         log(f'session memory unavailable: {type(e).__name__}')
     world_context += ('\nWORLD ACCESS PATHS: shared read-only helper: python3 -I "'
                       + WORLD_QUERY_CLIENT + '" <operation> [typed options] --telemetry-dir "'
-                      + WORLD_DIR + '". Static operations: creature, gameobject, spawns, quest, fishing, loot, item, spell. '
+                      + WORLD_DIR + '". Static operations: creature, gameobject, spawns, quest, fishing, loot, item, spell, vendors, item_sources. '
                       'The nearby operation filters/pages a pinned live snapshot; continue with its --session-id and --snapshot-seq. '
                       'Use typed operations only; never issue raw SQL.')
     if screenshot.get('available'):
@@ -492,7 +498,8 @@ def handle(model, effort, channel, sender, text, history):
             'status': 'not_sent', 'reason_code': action_error},
             screenshot.get('path') if screenshot.get('available') else None)
         cmds = []
-        log(f'rejected malformed action protocol: {action_error}')
+        action_at = reply.find('ACTION')
+        log(f'rejected malformed action protocol: {action_error} draft={reply[action_at:action_at + 400]!r}')
     if not can_execute_action:
         cmds = []
     if say:

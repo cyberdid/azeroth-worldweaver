@@ -61,7 +61,7 @@ namespace
     constexpr float DEFAULT_TELEMETRY_RADIUS = 100.0f;
     constexpr uint32 DEFAULT_MAX_NEARBY_OBJECTS = 500;
     constexpr uint32 MAX_AURAS_IN_SNAPSHOT = 32;
-    constexpr uint32 MAX_INVENTORY_ITEMS_IN_SNAPSHOT = 60;
+    constexpr uint32 MAX_INVENTORY_ITEMS_IN_SNAPSHOT = 256;
     constexpr std::size_t MAX_PLAYERBOT_ACTIONS_IN_SNAPSHOT = 512;
     constexpr std::size_t MAX_CONFIGURED_BOTS = 16;
     constexpr std::size_t MAX_TRACKED_OBJECTS = 8192;
@@ -1587,8 +1587,12 @@ namespace
     class ClaudeBridgeWorldPlayerScript : public PlayerScript
     {
     public:
+        uint32 _buffElapsed = 0;
         ClaudeBridgeWorldPlayerScript() : PlayerScript("ClaudeBridgeWorldPlayerScript", {
             PLAYERHOOK_ON_PLAYER_JUST_DIED,
+            PLAYERHOOK_ON_LOGIN,
+            PLAYERHOOK_ON_PLAYER_RESURRECT,
+            PLAYERHOOK_ON_UPDATE,
             PLAYERHOOK_ON_PLAYER_COMPLETE_QUEST,
             PLAYERHOOK_ON_PVP_KILL,
             PLAYERHOOK_ON_CREATURE_KILL_CREDIT,
@@ -1604,6 +1608,40 @@ namespace
             PLAYERHOOK_ON_UPDATE_FISHING_SKILL,
             PLAYERHOOK_ON_UPDATE_SKILL
         }) { }
+
+        void ApplyPersonalBuffs(Player* player)
+        {
+            uint32 const guid = sConfigMgr->GetOption<uint32>("ClaudeBridge.PersonalBuffCharacterGuid", 0);
+            if (!guid || player->GetGUID().GetCounter() != guid || !player->IsAlive())
+                return;
+
+            player->ApplySpellImmune(0, IMMUNITY_MECHANIC, MECHANIC_SLEEP, true);
+            for (uint32 spellId : {15366u, 22888u, 23768u, 25898u, 43002u, 48074u, 48162u, 48170u, 48470u})
+            {
+                Aura* aura = player->GetAura(spellId);
+                if (!aura)
+                    aura = player->AddAura(spellId, player);
+                if (aura)
+                {
+                    aura->SetMaxDuration(-1);
+                    aura->SetDuration(-1);
+                }
+            }
+        }
+
+        void OnPlayerLogin(Player* player) override { ApplyPersonalBuffs(player); }
+        void OnPlayerResurrect(Player* player, float, bool&) override { ApplyPersonalBuffs(player); }
+        void OnPlayerUpdate(Player* player, uint32 diff) override
+        {
+            if (player->GetGUID().GetCounter() != sConfigMgr->GetOption<uint32>("ClaudeBridge.PersonalBuffCharacterGuid", 0))
+                return;
+            _buffElapsed += diff;
+            if (_buffElapsed >= 10000)
+            {
+                _buffElapsed = 0;
+                ApplyPersonalBuffs(player);
+            }
+        }
 
         void OnPlayerJustDied(Player* player) override
         {

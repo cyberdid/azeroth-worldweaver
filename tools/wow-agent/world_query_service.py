@@ -20,7 +20,7 @@ _QUERY = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_QUERY)
 
 _REQUEST_NAME = re.compile(r"^([0-9a-f]{32})\.request\.json$")
-_OPERATIONS = {"creature", "gameobject", "spawns", "quest", "fishing", "loot", "item", "spell", "vendors"}
+_OPERATIONS = {"creature", "gameobject", "spawns", "quest", "fishing", "loot", "item", "spell", "vendors", "item_sources"}
 _ARGUMENTS = {
     "creature": {"entry", "name", "limit"},
     "gameobject": {"entry", "name", "limit"},
@@ -31,6 +31,7 @@ _ARGUMENTS = {
     "item": {"entry", "name", "limit"},
     "spell": {"id", "name", "limit"},
     "vendors": {"item_id", "name", "entry", "map_id", "limit", "offset"},
+    "item_sources": {"item_id", "name", "map_id", "x", "y", "z", "limit"},
 }
 _MAX_REQUEST_BYTES = 4096
 _MAX_AGE_SECONDS = 300

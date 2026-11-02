@@ -69,7 +69,7 @@ ACTION_REQUIRED_FIELDS = {
     "gossip_select": frozenset({"target_guid", "option_index"}),
     "trainer_action": frozenset({"target_guid", "learn"}),
     "offer_items": frozenset({"items"}),
-    "hunt_start": frozenset({"map_id", "zone_id", "kill_count", "deliver_loot"}),
+    "hunt_start": frozenset({"map_id", "zone_id"}),
     "hunt_cancel": frozenset(),
     "hunt_loot": frozenset(),
     "guide_start": frozenset({"map_id", "zone_id"}),
@@ -78,10 +78,11 @@ ACTION_REQUIRED_FIELDS = {
 }
 ACTION_OPTIONAL_FIELDS = {
     "vendor_buy": frozenset({"allow_extended_cost"}),
-    "vendor_task_start": frozenset({"allow_extended_cost", "return_to_user"}),
-    "trainer_task_start": frozenset({"learn"}),
+    "vendor_travel": frozenset({"travel_mode"}),
+    "vendor_task_start": frozenset({"allow_extended_cost", "return_to_user", "travel_mode"}),
+    "trainer_task_start": frozenset({"learn", "travel_mode"}),
     "cast_spell": frozenset({"target_guid"}),
-    "hunt_start": frozenset({"creature_entry", "creature_entries", "area_id", "collect_loot"}),
+    "hunt_start": frozenset({"creature_entry", "creature_entries", "area_id", "collect_loot", "kill_count", "deliver_loot"}),
     "guide_start": frozenset({"creature_entry", "creature_entries", "area_id"}),
     "playerbot_action": frozenset({"target_guid", "qualifier"}),
 }
@@ -334,6 +335,9 @@ def _encode_item_location(action: dict[str, Any]) -> str:
     return f"{item_entry}:{bag}:{slot}"
 
 
+DEFAULT_HUNT_KILL_COUNT = 40
+
+
 def _encode_hunt_request(action: dict[str, Any]) -> str:
     has_single = "creature_entry" in action
     has_multiple = "creature_entries" in action
@@ -353,8 +357,8 @@ def _encode_hunt_request(action: dict[str, Any]) -> str:
     map_id = action.get("map_id")
     zone_id = action.get("zone_id")
     area_id = action.get("area_id", 0)
-    kill_count = action.get("kill_count")
-    deliver_loot = action.get("deliver_loot")
+    kill_count = action.get("kill_count", DEFAULT_HUNT_KILL_COUNT)
+    deliver_loot = action.get("deliver_loot", False)
     if (not isinstance(map_id, int) or isinstance(map_id, bool) or not 0 <= map_id <= 0xFFFF):
         raise ValueError("invalid_map_id")
     if (not isinstance(zone_id, int) or isinstance(zone_id, bool) or not 0 <= zone_id <= 0xFFFF):
@@ -420,7 +424,13 @@ def _encode_playerbot_action(action: dict[str, Any]) -> str:
     return "p" + name.encode("ascii").hex() + "." + qualifier.encode("utf-8").hex()
 
 
+TRAVEL_MODES = {"walk": 0, "mount": 1, "fly": 2}
+
+
 def _encode_vendor_travel(action: dict[str, Any]) -> str:
+    mode = action.get("travel_mode", "walk")
+    if mode not in TRAVEL_MODES:
+        raise ValueError("invalid_travel_mode")
     for key, maximum in (("map_id",65535),("purchase_reserve_copper",0xFFFFFFFF)):
         value=action.get(key)
         if not isinstance(value,int) or isinstance(value,bool) or not 0<=value<=maximum:
@@ -429,7 +439,8 @@ def _encode_vendor_travel(action: dict[str, Any]) -> str:
     if not isinstance(position,list) or len(position)!=3 or any(
             not isinstance(v,(int,float)) or isinstance(v,bool) or not math.isfinite(v) or abs(v)>100000 for v in position):
         raise ValueError("invalid_vendor_position")
-    return f"r:{action['map_id']}:{':'.join(format(v,'.6f') for v in position)}:{action['purchase_reserve_copper']}"
+    token = f"r:{action['map_id']}:{':'.join(format(v,'.6f') for v in position)}:{action['purchase_reserve_copper']}"
+    return token + (f":{TRAVEL_MODES[mode]}" if mode != "walk" else "")
 
 
 def _encode_vendor_purchase(action: dict[str, Any]) -> str:
@@ -440,6 +451,8 @@ def _encode_vendor_purchase(action: dict[str, Any]) -> str:
     for key in ("allow_extended_cost", "return_to_user"):
         if key in action and not isinstance(action[key], bool):
             raise ValueError("invalid_vendor_" + key)
+    if action.get("travel_mode", "walk") not in TRAVEL_MODES:
+        raise ValueError("invalid_travel_mode")
     return f"v:{action['item_entry']}:{action['quantity']}:{action['max_total_copper']}:{int(action.get('allow_extended_cost', False))}"
 
 

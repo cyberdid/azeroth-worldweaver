@@ -7,10 +7,13 @@
 #include "GridDefines.h"
 #include "Map.h"
 #include "MotionMaster.h"
+#include "MoveSpline.h"
 #include "ObjectMgr.h"
 #include "Opcodes.h"
 #include "PathGenerator.h"
 #include "Player.h"
+#include "SpellInfo.h"
+#include "SpellMgr.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
 
@@ -31,6 +34,15 @@ namespace
     constexpr uint32 MAX_STALL_MS = 90000;
     constexpr uint32 REPATH_INTERVAL_MS = 2000;
     constexpr uint32 MAX_BOARDING_WAIT_MS = 20000;
+    // After this long descending, drop the flight flags where the bot is.
+    constexpr uint32 MAX_LANDING_MS = 15000;
+    constexpr uint8 MAX_MOUNT_ATTEMPTS = 3;
+    constexpr uint32 MAX_MOUNT_STOP_MS = 3000;
+    // Own flight: hops stay inside loaded grids; the landing is picked near the NPC.
+    constexpr float FLIGHT_HOP = 200.0f;
+    constexpr float FLIGHT_LANDING_SEARCH = 120.0f;
+    constexpr float FLIGHT_CLEARANCE = 30.0f;
+    constexpr uint32 MAX_FLIGHT_STALL_MS = 30000;
     constexpr std::size_t MAX_SOURCE_FLIGHTMASTERS = 6;
     constexpr std::size_t MAX_TAXI_HOPS = 32;
 
@@ -113,6 +125,88 @@ namespace
         uint32 fare;
         float seconds;
     };
+
+    // Fastest learned mount; with flying, only mounts that can fly.
+    uint32 FindMountSpell(Player* actor, bool flying)
+    {
+        uint32 best = 0;
+        int32 bestSpeed = -1;
+        for (auto const& [spellId, spell] : actor->GetSpellMap())
+        {
+            if (!spell || spell->State == PLAYERSPELL_REMOVED || !spell->Active)
+                continue;
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(spellId);
+            if (!info || !info->HasAura(SPELL_AURA_MOUNTED)
+                || (flying && !info->HasAura(SPELL_AURA_MOD_INCREASE_MOUNTED_FLIGHT_SPEED)))
+                continue;
+            int32 speed = 0;
+            for (SpellEffectInfo const& effect : info->Effects)
+                if (effect.ApplyAuraName == SPELL_AURA_MOD_INCREASE_MOUNTED_SPEED
+                    || effect.ApplyAuraName == SPELL_AURA_MOD_INCREASE_MOUNTED_FLIGHT_SPEED)
+                    speed = std::max(speed, effect.CalcValue());
+            if (speed > bestSpeed)
+            {
+                best = spellId;
+                bestSpeed = speed;
+            }
+        }
+        return best;
+    }
+
+    // Highest surface (terrain, roof or tree) under x,y.
+    float TopSurface(Player* actor, float x, float y, float fromZ)
+    {
+        return actor->GetMap()->GetHeight(actor->GetPhaseMask(), x, y, fromZ + 800.0f, true, 2000.0f);
+    }
+
+    // Flight altitude that clears every sampled surface between two points.
+    float CruiseHeight(Player* actor, float x1, float y1, float x2, float y2, float floorZ)
+    {
+        float const length = std::hypot(x2 - x1, y2 - y1);
+        uint32 const steps = std::max<uint32>(1, static_cast<uint32>(length / 20.0f));
+        float top = floorZ;
+        for (uint32 i = 0; i <= steps; ++i)
+        {
+            float const t = static_cast<float>(i) / steps;
+            float const surface = TopSurface(actor, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, floorZ);
+            if (surface > INVALID_HEIGHT)
+                top = std::max(top, surface);
+        }
+        return top + FLIGHT_CLEARANCE;
+    }
+
+    // Open-sky ground near the NPC from which a ground path reaches it.
+    bool PickOpenLanding(Player* actor, VendorJourneyLocation const& target, VendorJourneyLocation& landing)
+    {
+        constexpr float TWO_PI = 6.2831853071795864769f;
+        Map* map = actor->GetMap();
+        for (float radius : {0.0f, 6.0f, 12.0f, 20.0f, 30.0f, 45.0f, 60.0f, 80.0f, 100.0f, FLIGHT_LANDING_SEARCH})
+        {
+            uint32 const count = radius > 0.0f ? 16 : 1;
+            for (uint32 index = 0; index < count; ++index)
+            {
+                float const angle = TWO_PI * static_cast<float>(index) / count;
+                float const x = target.x + std::cos(angle) * radius;
+                float const y = target.y + std::sin(angle) * radius;
+                float const z = map->GetHeight(actor->GetPhaseMask(), x, y, target.z + 3.0f, true, 30.0f);
+                if (z <= INVALID_HEIGHT || std::abs(TopSurface(actor, x, y, z) - z) > 2.0f)
+                    continue;
+                if (radius > 0.0f)
+                {
+                    PathGenerator path(actor);
+                    path.CalculatePath(x, y, z, target.x, target.y, target.z, false);
+                    PathType const type = path.GetPathType();
+                    if (!(type & (PATHFIND_NORMAL | PATHFIND_INCOMPLETE))
+                        || (type & (PATHFIND_NOPATH | PATHFIND_SHORTCUT | PATHFIND_NOT_USING_PATH))
+                        || path.GetPath().size() < 2)
+                        continue;
+                }
+                landing = {target.mapId, x, y, z};
+                return true;
+            }
+        }
+        return false;
+    }
 
     Creature* FindFlightmaster(Player* actor, VendorJourneyRoute const& route)
     {
@@ -372,6 +466,7 @@ char const* VendorJourneyStageName(VendorJourneyStage stage)
         case VendorJourneyStage::RidingTransport: return "riding_transport";
         case VendorJourneyStage::DisembarkingTransport: return "disembarking_transport";
         case VendorJourneyStage::WaitingPortal: return "waiting_portal";
+        case VendorJourneyStage::FlyingMounted: return "flying_mounted";
         case VendorJourneyStage::Arrived: return "arrived";
         case VendorJourneyStage::Failed: return "failed";
         case VendorJourneyStage::Cancelled: return "cancelled";
@@ -381,7 +476,8 @@ char const* VendorJourneyStageName(VendorJourneyStage stage)
 
 VendorJourney::VendorJourney(VendorJourneyRoute route, uint32 reservedPurchaseCopper)
     : _route(std::move(route)), _reserve(reservedPurchaseCopper),
-      _stage(_route.UsesTaxi() ? VendorJourneyStage::WalkingToFlightmaster : VendorJourneyStage::WalkingToDestination),
+      _stage(_route.mode == VendorTravelMode::Fly ? VendorJourneyStage::FlyingMounted
+          : _route.UsesTaxi() ? VendorJourneyStage::WalkingToFlightmaster : VendorJourneyStage::WalkingToDestination),
       _resumeStage(_stage), _reason("journey_ready")
 {
     if (_route.transportPlan)
@@ -547,9 +643,214 @@ bool VendorJourney::Walk(Player* actor, VendorJourneyLocation const& target, uin
     return false;
 }
 
+bool VendorJourney::Land(Player* actor, uint32 elapsedMs)
+{
+    // A bot that followed a flying master keeps its flight flags while it
+    // hovers or stands; the ground route needs it on its feet first.
+    if (!actor->IsFlying() || actor->HasUnitState(UNIT_STATE_IN_FLIGHT)
+        || actor->GetTransport() || actor->GetVehicle())
+        return true;
+    float const x = actor->GetPositionX();
+    float const y = actor->GetPositionY();
+    float const groundZ = actor->GetMapWaterOrGroundLevel(x, y, actor->GetPositionZ());
+    _landingMs += elapsedMs;
+    if (actor->GetPositionZ() - groundZ > 1.5f && _landingMs < MAX_LANDING_MS)
+    {
+        if (!actor->isMoving())
+        {
+            actor->GetMotionMaster()->MovePoint(JOURNEY_POINT_ID, x, y, groundZ,
+                FORCED_MOVEMENT_NONE, 0.0f, 0.0f, false, true);
+            _ownsMovement = true;
+        }
+        _reason = "journey_landing";
+        return false;
+    }
+    StopOwnedMovement(actor);
+    actor->RemoveUnitMovementFlag(MOVEMENTFLAG_FLYING | MOVEMENTFLAG_DISABLE_GRAVITY | MOVEMENTFLAG_CAN_FLY);
+    if (_route.mode == VendorTravelMode::Walk)
+        actor->RemoveAurasByType(SPELL_AURA_MOUNTED);
+    actor->SendMovementFlagUpdate();
+    _landingMs = 0;
+    _repathMs = REPATH_INTERVAL_MS;
+    _hasLastPosition = false;
+    _stalledMs = 0;
+    return !actor->IsFlying();
+}
+
+// Returns true while a mount cast is in progress (the caller waits). Indoors,
+// in combat or without a suitable mount the bot simply goes on without one.
+bool VendorJourney::TryMount(Player* actor, bool flying, uint32 elapsedMs)
+{
+    if (actor->IsNonMeleeSpellCast(false))
+    {
+        _reason = "journey_mounting";
+        return true;
+    }
+    if (actor->IsMounted() || _mountAttempts >= MAX_MOUNT_ATTEMPTS || !actor->IsOutdoors()
+        || actor->IsInCombat() || actor->IsInWater() || actor->IsInDisallowedMountForm())
+        return false;
+    uint32 const spell = FindMountSpell(actor, flying);
+    if (!spell)
+    {
+        _mountAttempts = MAX_MOUNT_ATTEMPTS;
+        return false;
+    }
+    // A mount has a cast time and fails while moving: halt, then cast next tick.
+    if (actor->isMoving() || !actor->movespline->Finalized())
+    {
+        StopOwnedMovement(actor);
+        actor->StopMoving();
+        _mountWaitMs += elapsedMs;
+        if (_mountWaitMs < MAX_MOUNT_STOP_MS)
+        {
+            _reason = "journey_stopping_to_mount";
+            return true;
+        }
+    }
+    _mountWaitMs = 0;
+    ++_mountAttempts;
+    SpellCastResult const cast = actor->CastSpell(actor, spell, false);
+    _reason = cast == SPELL_CAST_OK ? "journey_mounting" : "journey_mount_failed";
+    return actor->IsNonMeleeSpellCast(false);
+}
+
+void VendorJourney::TouchDown(Player* actor, char const* reason)
+{
+    StopOwnedMovement(actor);
+    actor->RemoveUnitMovementFlag(MOVEMENTFLAG_FLYING | MOVEMENTFLAG_DISABLE_GRAVITY | MOVEMENTFLAG_CAN_FLY);
+    actor->SendMovementFlagUpdate();
+    // The rest of the way is on the ground; keep riding the mount there.
+    _route.mode = VendorTravelMode::Mount;
+    _stage = VendorJourneyStage::WalkingToDestination;
+    _reason = reason;
+    _repathMs = REPATH_INTERVAL_MS;
+    _hasLastPosition = false;
+    _stalledMs = 0;
+}
+
+void VendorJourney::FlyOwnMount(Player* actor, uint32 elapsedMs)
+{
+    VendorJourneyLocation const here = Location(actor);
+    if (!_takenOff)
+    {
+        // Under a roof (Ironforge counts as outdoors for mounts) the climb would
+        // pass through rock: come down first and walk out; take off only under
+        // open sky, i.e. no surface above the bot.
+        if (!actor->IsOutdoors() || TopSurface(actor, here.x, here.y, here.z) > here.z + 3.0f)
+        {
+            if (!Land(actor, elapsedMs))
+                return;
+            if (Walk(actor, _route.destination, elapsedMs))
+            {
+                _stage = VendorJourneyStage::Arrived;
+                _reason = "journey_destination_reached";
+            }
+            else if (!IsTerminal())
+                _reason = "journey_walking_outdoors_to_fly";
+            return;
+        }
+        if (!actor->IsMounted())
+        {
+            if (TryMount(actor, true, elapsedMs))
+                return;
+            if (!actor->IsMounted())
+            {
+                TouchDown(actor, "journey_flight_unavailable");
+                return;
+            }
+        }
+        StopOwnedMovement(actor);
+        actor->AddUnitMovementFlag(MOVEMENTFLAG_CAN_FLY | MOVEMENTFLAG_DISABLE_GRAVITY | MOVEMENTFLAG_FLYING);
+        actor->SendMovementFlagUpdate();
+        _takenOff = true;
+        _flightLeg = 0;
+        _hasLastPosition = false;
+        _stalledMs = 0;
+    }
+
+    if (_hasLastPosition && Distance(here, _lastPosition) >= 1.0f)
+        _stalledMs = 0;
+    else
+        _stalledMs += elapsedMs;
+    _lastPosition = here;
+    _hasLastPosition = true;
+    if (_stalledMs > MAX_FLIGHT_STALL_MS)
+    {
+        // Leave the air via the normal descent and finish on the ground.
+        _route.mode = VendorTravelMode::Mount;
+        _stage = VendorJourneyStage::WalkingToDestination;
+        _reason = "journey_flight_stalled";
+        _stalledMs = 0;
+        _hasLastPosition = false;
+        return;
+    }
+    if (!actor->movespline->Finalized())
+        return;
+
+    VendorJourneyLocation const& target = _route.destination;
+    float const remaining = std::hypot(target.x - here.x, target.y - here.y);
+    float const speed = std::max(actor->GetSpeed(MOVE_FLIGHT), actor->GetSpeed(MOVE_RUN));
+    auto flyTo = [&](float x, float y, float z, char const* reason)
+    {
+        actor->GetMotionMaster()->MovePoint(JOURNEY_POINT_ID, x, y, z, FORCED_MOVEMENT_NONE, speed, 0.0f, false, true);
+        _ownsMovement = true;
+        _reason = reason;
+    };
+
+    if (_flightLeg == 0 && remaining > FLIGHT_LANDING_SEARCH)
+    {
+        // Hop toward the NPC inside loaded grids; climb first when the hop
+        // needs more height so the straight line never cuts a hillside.
+        float const hop = std::min(FLIGHT_HOP, remaining - FLIGHT_LANDING_SEARCH * 0.5f);
+        float const x = here.x + (target.x - here.x) / remaining * hop;
+        float const y = here.y + (target.y - here.y) / remaining * hop;
+        float const z = CruiseHeight(actor, here.x, here.y, x, y, std::max(here.z, target.z) - FLIGHT_CLEARANCE);
+        if (z > here.z + 3.0f)
+            flyTo(here.x, here.y, z, "journey_flying_climb");
+        else
+            flyTo(x, y, z, "journey_flying");
+        return;
+    }
+    if (_flightLeg == 0)
+    {
+        if (actor->GetDistance2d(target.x, target.y) <= 300.0f)
+            actor->GetMap()->EnsureGridCreated(Acore::ComputeGridCoord(target.x, target.y));
+        if (!PickOpenLanding(actor, target, _landing))
+        {
+            TouchDown(actor, "journey_no_open_landing");
+            return;
+        }
+        _hasLanding = true;
+        _flightLeg = 1;
+    }
+    if (_flightLeg == 1)
+    {
+        float const z = CruiseHeight(actor, here.x, here.y, _landing.x, _landing.y, _landing.z);
+        if (z > here.z + 3.0f)
+        {
+            flyTo(here.x, here.y, z, "journey_flying_climb");
+            return;
+        }
+        if (std::hypot(_landing.x - here.x, _landing.y - here.y) > 2.0f)
+        {
+            flyTo(_landing.x, _landing.y, std::max(z, here.z), "journey_flying_to_landing");
+            return;
+        }
+        _flightLeg = 2;
+    }
+    if (here.z - _landing.z > 1.5f)
+    {
+        flyTo(_landing.x, _landing.y, _landing.z, "journey_descending");
+        return;
+    }
+    TouchDown(actor, "journey_landed");
+}
+
 VendorJourneyStage VendorJourney::Tick(Player* actor, uint32 elapsedMs)
 {
     if (IsTerminal())
+        return _stage;
+    if (_stage != VendorJourneyStage::FlyingMounted && actor && actor->IsInWorld() && !Land(actor, elapsedMs))
         return _stage;
     if (_transport)
     {
@@ -602,6 +903,11 @@ VendorJourneyStage VendorJourney::Tick(Player* actor, uint32 elapsedMs)
         Fail(actor, "journey_external_taxi_started");
         return _stage;
     }
+    if (_stage == VendorJourneyStage::FlyingMounted && !actor->GetTransport() && !actor->GetVehicle())
+    {
+        FlyOwnMount(actor, elapsedMs);
+        return _stage;
+    }
     if (actor->IsFlying() || actor->GetTransport() || actor->GetVehicle()
         || actor->GetMap()->IsDungeon() || actor->InBattleground())
     {
@@ -633,6 +939,8 @@ VendorJourneyStage VendorJourney::Tick(Player* actor, uint32 elapsedMs)
             && actor->GetNPCIfCanInteractWith(flightmaster->GetGUID(), UNIT_NPC_FLAG_FLIGHTMASTER) == flightmaster;
         if (!interactable)
         {
+            if (_route.mode != VendorTravelMode::Walk && TryMount(actor, false, elapsedMs))
+                return _stage;
             if (Walk(actor, _route.flightmasterLocation, elapsedMs))
             {
                 Fail(actor, "journey_flightmaster_unavailable");
@@ -673,6 +981,8 @@ VendorJourneyStage VendorJourney::Tick(Player* actor, uint32 elapsedMs)
         _reason = "journey_waiting_cast";
         return _stage;
     }
+    if (_route.mode != VendorTravelMode::Walk && TryMount(actor, false, elapsedMs))
+        return _stage;
     if (Walk(actor, _route.destination, elapsedMs))
     {
         _stage = VendorJourneyStage::Arrived;
